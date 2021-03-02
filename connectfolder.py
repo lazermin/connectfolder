@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
+
+# Version 0.1
+# Last update: 02-03-2021
+
+
 import configparser
-# yum install python3-tkinter
+# yum install python3-tkinter python3-pillow-tk python3-pillow
 import os
 import subprocess
 from io import open
 from tkinter import *
 from tkinter import messagebox
+from PIL import Image, ImageTk
 
 config = configparser.ConfigParser()
 
@@ -14,10 +20,10 @@ p_autosamba = '/etc/auto.samba'
 p_automaster = '/etc/auto.master'
 parm_smbver1 = 'vers=1.0,'
 lab_mark = ''
-txt_con_Button = 'Подключить'
 var_edit = 0
 params_automaster = '/mnt/share    /etc/auto.samba    --ghost'
 status_folder = 'Статус'
+path_icon = '/usr/share/icons/Adwaita/22x22/emblems/emblem-default.png'
 
 # Функция поиска в файле p_automaster
 def write_auto_master():
@@ -394,7 +400,7 @@ root.title('Подключение сетевого каталога')
 # root.eval('tk::PlaceWindow %s center' % root.winfo_pathname(root.winfo_id()))
 root.geometry("550x450+300+300")
 # Делаем невозможным менять размеры окна
-root.resizable(width=False, height=False)
+#root.resizable(width=False, height=False)
 
 root.grid_rowconfigure(1, weight=1)
 root.grid_columnconfigure(0, weight=1)
@@ -471,14 +477,19 @@ a.set('Имя домена или рабочей группы : ')
 editDomain = Entry(frame_top, bg='white', bd=2, font=25, width=20)
 editDomain.grid(row=5, column=1)
 
-photo = PhotoImage(file=r'pic_button_connect.gif')
-photo = photo.subsample(2, 2)
+# Проверка существования иконки
+if os.path.isfile(path_icon):
+    photo = ImageTk.PhotoImage(Image.open(path_icon))
+    size_button = 180
+else:
+    photo = None
+    size_button = 22
 
-# Создаем кнопку и подключить
+# Создаём кнопку "Подключить"
 Label(frame_top, text='').grid(row=6, column=1)
-connect_Button = Button(frame_top, bd=2, bg='#F0F8FF', image=photo, text=txt_con_Button, command=attach_folder,
-       compound=LEFT, width=180)
-connect_Button.grid(row=6, column=1, pady=6)
+connect_Button = Button(frame_top, bd=2, bg='#F0F8FF', image=photo,  text='Подключить', command=attach_folder,
+       compound=LEFT, width=size_button)
+connect_Button.grid(row=6, column=1, pady=4)
 
 # -------Фрейм Listbox--------
 frame_list = Frame(root, bd=8)
@@ -494,7 +505,7 @@ scroll.pack(side=RIGHT, fill='y')
 listB.pack()
 listB.bind('<<ListboxSelect>>', on_select)  # Событие когда выбран элемент listbox
 
-# --------Фрейм button--------
+# --------Фрейм list--------
 frame_list = Frame(root, bd=4, bg='#708090')
 frame_list.place(relx=0, rely=0.84, relwidth=1, height=50)
 
@@ -545,7 +556,7 @@ def update_listbox():
 
 if os.geteuid() == 0:
     update_listbox()
-    root.mainloop()  # Запускаем постоянный цикл, чтобы программа работала
+    root.mainloop()  # Запускаем постоянный цикл
 if not os.geteuid() == 0:
     root.withdraw()
     messagebox.showinfo('Error', 'Запустите программу от пользователя root')
