@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 # Version 0.1
-# Last update: 02-03-2021
+# Last update: 03-03-2021
 
 
 import configparser
@@ -400,7 +400,7 @@ root.title('Подключение сетевого каталога')
 # root.eval('tk::PlaceWindow %s center' % root.winfo_pathname(root.winfo_id()))
 root.geometry("550x450+300+300")
 # Делаем невозможным менять размеры окна
-#root.resizable(width=False, height=False)
+root.resizable(width=False, height=False)
 
 root.grid_rowconfigure(1, weight=1)
 root.grid_columnconfigure(0, weight=1)
