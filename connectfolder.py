@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 
-# Version 0.1
-# Last update: 03-03-2021
+# Version 0.1.4
+# Last update: 25-05-2021
 
 
 import configparser
 # yum install python3-tkinter python3-pillow-tk python3-pillow
 import os
+import re
 import subprocess
 from io import open
 from tkinter import *
 from tkinter import messagebox
 from PIL import Image, ImageTk
+from sys import argv
 
 config = configparser.ConfigParser()
 
@@ -21,9 +23,9 @@ p_automaster = '/etc/auto.master'
 parm_smbver1 = 'vers=1.0,'
 lab_mark = ''
 var_edit = 0
-params_automaster = '/mnt/share    /etc/auto.samba    --ghost'
-status_folder = 'Статус'
-path_icon = '/usr/share/icons/Adwaita/22x22/emblems/emblem-default.png'
+params_automaster = '/media/share    /etc/auto.samba    --ghost'
+status_folder = 'Статус подключения'
+path_icon = '/usr/share/icons/mate/22x22/emblems/emblem-default.png'
 
 # Функция поиска в файле p_automaster
 def write_auto_master():
@@ -57,7 +59,7 @@ def file_smbuser(name_folder):
     return file_smbuser_path
 
 
-# функция парсинга конфига и записи
+# Функция парсинга конфига и записи
 def write_smbuser(auth_path, user_n, pass_w, domain_n):
     config_auth = configparser.ConfigParser()  # Создаём объекта парсера
     config_auth.read(auth_path)  # Читаем конфиг
@@ -86,7 +88,7 @@ def clear_edit():
     editDomain.delete(0, END)
 
 
-#  Функци обрезки последнего Slash / в конце каталога
+#  Функция обрезки последнего Slash / в конце каталога
 def slash(str_Path_D = '', str_Folder_F = ''):
     if ', '.join(re.findall(r'(^.*)\/$', str_Path_D)):  # если в конце найден символ / то
         str_Path_D = ', '.join(re.findall(r'(^.*)\/$', str_Path_D))  # удаляем /
@@ -96,7 +98,7 @@ def slash(str_Path_D = '', str_Folder_F = ''):
     if ', '.join(re.findall(r'(^.*)\/$', str_Folder_F)):  # если в конце найден символ / то
         str_Folder_F = ', '.join(re.findall(r'(^.*)\/$', str_Folder_F))  # удаляем /
     else:
-        str_Folder_F = str_Folder_F  # оставляем как есть
+        str_Folder_F = str_Folder_F  # Оставляем как есть
     return str_Path_D, str_Folder_F
 
 
@@ -126,7 +128,7 @@ def params_domain():
 
 def get_folder_in_autosamba(editFolder):
     global result
-    File = open_auto_samba()  # читаем файл '/etc/auto.samba'
+    File = open_auto_samba()  # Читаем файл '/etc/auto.samba'
     if os.stat(p_autosamba).st_size == 0:  # если файл пустой
         result = 'False'
     for elem in File:
@@ -163,7 +165,7 @@ def edit_auto_samba():
 def add_point_mount_edit():
     str_PF = slash(editPath.get(), editFolder.get())
     auth_path1 = file_smbuser(str_PF[1])  # Полный путь до файла авторизации
-    auth_path2 = file_smbuser(g_edit_folder)  # полный путь до файла авторизации
+    auth_path2 = file_smbuser(g_edit_folder)  # Полный путь до файла авторизации
     if auth_path1 == auth_path2:
         write_smbuser(file_smbuser(str_PF[1]), editName.get(), editPassword.get(),
                   editDomain.get())  # Вызов функции замены параметров в файле авторизации
@@ -171,7 +173,7 @@ def add_point_mount_edit():
         update_listbox()
 
     if auth_path1 != auth_path2:  # Если файл авторизации существует то
-        if os.path.isfile(auth_path1):  # если файл авторизации существует то
+        if os.path.isfile(auth_path1):  # Если файл авторизации существует то
             messagebox.showinfo('Connect folder', 'Присвойте другое имя')
             clear_edit()
             return
@@ -212,21 +214,38 @@ def add_point_mount():
         clear_edit()
         update_listbox()
     label_mark.config(text=None, bg=None)
-    update_listbox()
     subprocess.call(['systemctl', 'enable', 'autofs'])
-    subprocess.call(['systemctl', 'restart', 'autofs'])
+    update_listbox()
+
+# Проверка доступаности хоста
+def ping_host(host):
+    ping_command = os.system(f'ping -c 1 {host} &>/dev/null')
+    if ping_command == 0:
+        print("Хост доступен!")
+    else:
+        print("Хост не доступен!")
+        ping_result = "Хост не доступен!"
+        return ping_result
 
 
 # Подключение сетевого каталога
 def attach_folder():
-    write_auto_master()
-    create_folder()
     if editPath.get() == '':
         messagebox.showinfo('Connect folder', 'Заполните поле "сетевой путь"')
         return
+
+# Получить имя хоста или IP-адрес и проверить его доступность.
+    get_host = re.findall(r'.[^\/]*', editPath.get())[0]
+    if ping_host(get_host) == "Хост не доступен!":
+        messagebox.showinfo('Connect folder', get_host + ' не доступен!')
+        return
+
     if editFolder.get() == '':
         messagebox.showinfo('Connect folder', '       Заполните поле\n "Каталог монтирования"')
         return
+
+    write_auto_master()
+    create_folder()
 
     if lab_mark == 'Редактирование списка!':
         add_point_mount_edit()
@@ -235,7 +254,6 @@ def attach_folder():
         if get_folder_in_autosamba(editFolder.get()) == 'True':  # поиск точки монтирования в auto.samba
             messagebox.showinfo('Connect folder', 'Точка монтирования с таким именем уже существует!')
         else:
-            pass
             add_point_mount()
     c1.deselect()  # Снимаем флажок checkbox
 
@@ -256,7 +274,6 @@ def del_mount():
         update_listbox()
         path = p_folder + '/' + name_Folder_File
         os.remove(path)
-        subprocess.call(['systemctl', 'restart', 'autofs'])
         clear_edit()
         c1.deselect()  # Снимаем флажок checkbox
     else:
@@ -277,7 +294,7 @@ def get_params_in_to_edit():
     global g_edit_folder
     # Код заполнения полей edits
     editPath.config(state="normal")
-    global name_Folder_File  # для передачи имени файла в функцию удаления
+    global name_Folder_File  # Для передачи имени файла в функцию удаления
     clear_edit()
     lineFile = open_auto_samba()  # читаем номер строки из файла '/etc/auto.samba'
     str_domain = os.popen('domainname -d')
@@ -325,10 +342,10 @@ def clear_focus_listbox():
 
 
 def edit_mount():
-    clear_edit()  # Очиска полей
+    clear_edit()  # Очистка полей
     clear_focus_listbox()
     delButton.pack(side=RIGHT)
-    # глобальные маркеры переключения
+    # Глобальные маркеры переключения
     global var_edit
     global lab_mark
     # Переключатель кнопки редактирования/отмена
@@ -358,7 +375,12 @@ def edit_mount():
         editButton.config(text='Редактировать список')
         var_edit = 0
         delButton.pack_forget()
-
+        if realm_check() != '':
+            var2.set(1)
+            clear_edit()
+            editName.config(state="readonly")
+            editPassword.config(state="readonly")
+            editDomain.config(state="readonly")
 
 
 def open_auto_samba():
@@ -367,24 +389,41 @@ def open_auto_samba():
     f.close()
     return lineFile
 
-
 def on_select(*self):
     global list_number
     global status_folder
     try:
         list_number = number_list()
         find_folder_name = re.findall(r'share\/(.*)', listB.get(list_number))  # Регулярка поиска каталога
-        if os.path.exists('/mnt/share/' + find_folder_name[0] + '/'):  # Проверка существования каталога (возвращает True/False)
-           lable_status_folder.config(text='Доступен ;)')
+        folder_path = '/media/share/' + find_folder_name[0] + '/'
+        script = """
+            #!/bin/bash
+            cd """ + folder_path + """ && cd /
+            exit
+            """
+        if len(argv) < 2:
+            arg = '$USER'
+        else:
+            arg = argv[1]
+        result = os.system("su {0} bash -c '{1}'".format(arg, script))
+        if result == 0:
+           lable_status_folder.config(text='Каталог доступен!')
            lable_status_folder.config(bg='green')
         else:
-            lable_status_folder.config(text='Не доступен :(')
+            lable_status_folder.config(text='Каталог не доступен.')
             lable_status_folder.config(bg='#708090')
         # Вызов функции заполнения полей
         if lab_mark == 'Редактирование списка!':
             get_params_in_to_edit()
     except:
           pass
+
+# Проверка ПК на членство в домене
+def realm_check():
+    result_check = os.popen("realm list")
+    result_check = result_check.read()
+    print(result_check)
+    return result_check
 
 
 ''''
@@ -397,8 +436,7 @@ root['bg'] = '#fafafa'
 # Указываем название окна
 root.title('Подключение сетевого каталога')
 # Указываем размеры окна и положение в центре
-# root.eval('tk::PlaceWindow %s center' % root.winfo_pathname(root.winfo_id()))
-root.geometry("550x450+300+300")
+root.geometry("550x470+300+300")
 # Делаем невозможным менять размеры окна
 root.resizable(width=False, height=False)
 
@@ -419,6 +457,7 @@ def chek_status_domain():
         editDomain.config(state="normal")
 
 
+
 # Фрейм переключателей
 var1 = BooleanVar()
 var2 = BooleanVar()
@@ -426,21 +465,20 @@ var2 = BooleanVar()
 frame_lable = Frame(root, bd=5)
 frame_lable.grid(row=0, sticky="we")
 
-c1 = Checkbutton(frame_lable, text="smb v1", variable=var1, onvalue=1, offvalue=0)
-c1.place(relx=0, rely=0.5)
-c1.grid(row=0, column=0, sticky="e")
-
 # Переключатель домена
-c2 = Checkbutton(frame_lable, text="Если ПК в домене", variable=var2, onvalue=1, offvalue=0, command=chek_status_domain)
+c2 = Checkbutton(frame_lable, text="ПК в домене", variable=var2, onvalue=1, offvalue=0, command=chek_status_domain)
 c2.place(relx=0, rely=0.5)
 c2.grid(row=0, column=0, sticky="w")
 
+c1 = Checkbutton(frame_lable, text="Использовать smb 1.0", variable=var1, onvalue=1, offvalue=0)
+c1.place(relx=0, rely=0.5)
+c1.grid(row=0, column=0, sticky="e")
 
 # Label path
 Label(frame_lable, text="Укажите сетевой путь в формате: ServerName/share/myfolder").grid(row=1)
-# Создаем текстовое поле "сетевой путь"
-editPath = Entry(frame_lable, bg='white', bd=2, font=25, width=53)
-editPath.grid(row=2, column=0)
+# Создаём текстовое поле "сетевой путь"
+editPath = Entry(frame_lable, bg='white', bd=2, width=66)
+editPath.grid(row=2, column=0, ipady=2)
 
 
 # --------Фрейм c grid--------
@@ -448,15 +486,23 @@ frame_top = Frame(root, bd=4)
 frame_top.grid(row=1, sticky="nswe")
 
 # name mount path
-lableFolder = Label(frame_top, text="        Каталог монтирования /mnt/share/").grid(row=2, column=0, padx=15)
+lableFolder = Label(frame_top, text="Каталог монтирования /media/share/").grid(row=2, column=0, padx=22)
+
 # Name folder
-editFolder = Entry(frame_top, bg='white', bd=2, font=25, width=20)
-editFolder.grid(row=2, column=1, sticky="e")
+# Реализация ввода только символов и цифр.
+pattern = re.compile("^\w{0,30}$")
+def validate_username(index, username):
+    return pattern.match(username) is not None
+
+editFolder = Entry(frame_top, bg='white', bd=2, font=25, width=25, validate="key", validatecommand="vcmd")
+editFolder['vcmd'] = (editFolder.register(validate_username), "%i", "%P")
+editFolder.grid(row=2, column=1, sticky=E)
+
 
 # Label name
 labelName = Label(frame_top, text="Имя пользователя: ").grid(row=3, column=0, sticky="e", padx=10)
 # Edit name
-editName = Entry(frame_top, bg='white', bd=2, font=25, width=20)
+editName = Entry(frame_top, bg='white', bd=2, font=25, width=25)
 editName.grid(row=3, column=1)
 
 # Label password
@@ -464,7 +510,7 @@ labelPassword = Label(frame_top, text="Пароль пользователя: ")
 
 
 # Edit password
-editPassword = Entry(frame_top, bg='white', bd=2, font=25, width=20)
+editPassword = Entry(frame_top, bg='white', bd=2, font=25, width=25)
 editPassword.config(show='*')
 editPassword.grid(row=4, column=1)
 
@@ -472,9 +518,9 @@ editPassword.grid(row=4, column=1)
 # label domain
 a = StringVar()
 labelDomain = Label(frame_top, textvariable=a).grid(row=5, column=0, sticky="e", padx=10)
-a.set('Имя домена или рабочей группы : ')
+a.set('Имя домена или рабочей группы: ')
 # Edit domain
-editDomain = Entry(frame_top, bg='white', bd=2, font=25, width=20)
+editDomain = Entry(frame_top, bg='white', bd=2, font=25, width=25)
 editDomain.grid(row=5, column=1)
 
 # Проверка существования иконки
@@ -527,21 +573,26 @@ lable_status_folder.place(relx=0, rely=0.95, relwidth=1, height=22)
 lable_status_folder = Label(lable_status_folder, text=status_folder, bg='#708090')
 lable_status_folder.pack(side=RIGHT, padx=6)
 
+# Если ПК в домене, то блокируем по умолчанию некторые компоненты
+if realm_check() != '':
+    var2.set(1)
+    clear_edit()
+    editName.config(state="readonly")
+    editPassword.config(state="readonly")
+    editDomain.config(state="readonly")
 
 # Парсинг конфига
 def update_listbox():
     if os.path.isfile(p_autosamba):  # Если конфиг существует
         listB.configure(state='normal')
         listB.delete(0, END)
-        #   listB.configure(state='disabled')
-
         str_file = open_auto_samba()
         i = 0
         try:
             for item in str_file:
                 m_folder = re.findall(r'\w+', str_file[i])  # Поиск первого слова(имя каталога)
                 str_path = re.findall(r'(:.+)$', str_file[i])
-                str_list = ', '.join(map(str, str_path)) + '    ->    /mnt/share/' + m_folder[0]
+                str_list = ', '.join(map(str, str_path)) + '    ->    /media/share/' + m_folder[0]
                 listB.insert(END, str_list)
                 i += 1
         except:
@@ -552,7 +603,7 @@ def update_listbox():
         f.write('')
         f.close()
         clear_edit()
-
+    subprocess.call(['systemctl', 'restart', 'autofs'])
 
 if os.geteuid() == 0:
     update_listbox()
