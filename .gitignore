@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+connectfolder-*.tar.gz
+connectfolder-*/

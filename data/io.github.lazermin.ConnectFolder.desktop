@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Network Folders
+Name[ru]=Сетевые каталоги
+GenericName=SMB network folders
+GenericName[ru]=Подключение сетевых каталогов
+Comment=Connect SMB/CIFS shares via autofs
+Comment[ru]=Подключение сетевых каталогов SMB через autofs
+Exec=connectfolder
+Icon=folder-remote
+Terminal=false
+Categories=GTK;System;Settings;Network;
+Keywords=smb;cifs;samba;autofs;share;network;шара;сетевой;каталог;
+StartupNotify=true

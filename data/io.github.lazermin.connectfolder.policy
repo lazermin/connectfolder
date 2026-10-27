@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>connectfolder</vendor>
+  <vendor_url>https://github.com/lazermin/connectfolder</vendor_url>
+  <icon_name>folder-remote</icon_name>
+
+  <action id="io.github.lazermin.connectfolder.helper">
+    <description>Manage SMB network folders (autofs)</description>
+    <description xml:lang="ru">Управление сетевыми каталогами SMB (autofs)</description>
+    <message>Authentication is required to change network folder settings</message>
+    <message xml:lang="ru">Для изменения настроек сетевых каталогов требуется аутентификация</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/connectfolder/connectfolder-helper</annotate>
+  </action>
+</policyconfig>

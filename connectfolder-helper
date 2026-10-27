@@ -1,0 +1,178 @@
+#!/usr/bin/python3 -I
+"""Привилегированный помощник connectfolder.
+
+Запускается через pkexec один раз за сеанс и читает запросы JSON построчно
+из stdin. Умеет только действия из белого списка: сохранить и удалить
+каталог, прочитать имя/домен учётной записи, перенести старую конфигурацию,
+подготовить autofs. Произвольные команды не выполняет, shell не использует.
+
+Ручной перенос старой конфигурации (вызывается из %post пакета):
+    connectfolder-helper --migrate [--quiet]
+"""
+
+import json
+import os
+import sys
+
+# Модуль ядра ищем только в доверенных местах, не в текущем каталоге.
+for _p in ("/usr/share/connectfolder", os.path.dirname(os.path.realpath(__file__))):
+    if os.path.isfile(os.path.join(_p, "connectfolder_core.py")):
+        sys.path.insert(0, _p)
+        break
+
+import connectfolder_core as core  # noqa: E402
+
+os.umask(0o022)
+
+
+def make_system():
+    """Корень и режим.
+
+    CONNECTFOLDER_ROOT (демо и тесты) переносит все пути в другой каталог и
+    отключает системные команды. pkexec очищает окружение, поэтому через
+    него эту переменную не передать.
+    """
+    root = os.environ.get("CONNECTFOLDER_ROOT")
+    if root:
+        if os.path.abspath(root) == "/":
+            sys.stderr.write("connectfolder-helper: CONNECTFOLDER_ROOT не может быть /\n")
+            sys.exit(1)
+        return core.System(core.Paths(root), run_commands=False)
+    if os.geteuid() != 0:
+        sys.stderr.write("connectfolder-helper: нужны права root (запуск через pkexec)\n")
+        sys.exit(1)
+    return core.System(core.Paths("/"), run_commands=True)
+
+
+def _require_str(params, name):
+    v = params.get(name)
+    if not isinstance(v, str):
+        raise core.ValidationError("Не передан параметр {}".format(name))
+    return v
+
+
+def _creds_param(params):
+    c = params.get("credentials")
+    if c is None:
+        return None
+    if not isinstance(c, dict):
+        raise core.ValidationError("Неверные учётные данные")
+    out = {}
+    for k in ("username", "domain"):
+        v = c.get(k, "")
+        if not isinstance(v, str):
+            raise core.ValidationError("Неверное поле {}".format(k))
+        out[k] = v
+    pw = c.get("password")
+    if pw is not None and not isinstance(pw, str):
+        raise core.ValidationError("Неверный пароль")
+    out["password"] = pw
+    return out
+
+
+def action_hello(sysops, params):
+    return {"version": core.VERSION, "demo": not sysops.paths.is_real}
+
+
+def action_get_credentials(sysops, params):
+    return core.get_credentials(sysops.paths, _require_str(params, "key"))
+
+
+def action_save(sysops, params):
+    share = core.Share.from_dict(params.get("share"))
+    orig = params.get("original_key")
+    if orig is not None and not isinstance(orig, str):
+        raise core.ValidationError("Неверный original_key")
+    saved = core.save_share(sysops, share, _creds_param(params), orig or None)
+    return {"share": saved.to_dict()}
+
+
+def action_remove(sysops, params):
+    core.remove_share(sysops, _require_str(params, "key"))
+    return {}
+
+
+def action_migrate(sysops, params):
+    rep = core.migrate_old_config(sysops)
+    return rep.to_dict()
+
+
+def action_setup(sysops, params):
+    core.ensure_master(sysops)
+    core.reload_autofs(sysops)
+    return {}
+
+
+ACTIONS = {
+    "hello": (action_hello, False),
+    "get_credentials": (action_get_credentials, False),
+    "save": (action_save, True),
+    "remove": (action_remove, True),
+    "migrate": (action_migrate, True),
+    "setup": (action_setup, True),
+}
+
+
+def handle(sysops, req):
+    if not isinstance(req, dict):
+        return {"ok": False, "error": "Неверный запрос"}
+    rid = req.get("id")
+    action = req.get("action")
+    params = req.get("params") or {}
+    if action not in ACTIONS or not isinstance(params, dict):
+        return {"id": rid, "ok": False, "error": "Неизвестное действие: {}".format(action)}
+    fn, writes = ACTIONS[action]
+    sysops.begin()
+    try:
+        result = fn(sysops, params)
+    except (core.ValidationError, core.OperationError) as e:
+        sysops.rollback()
+        return {"id": rid, "ok": False, "error": str(e),
+                "log": [x.to_dict() for x in sysops.log]}
+    except Exception as e:      # noqa: BLE001 — откат при любой ошибке
+        sysops.rollback()
+        return {"id": rid, "ok": False,
+                "error": "Внутренняя ошибка: {}: {}".format(type(e).__name__, e),
+                "log": [x.to_dict() for x in sysops.log]}
+    if writes:
+        sysops.commit()
+    return {"id": rid, "ok": True, "result": result,
+            "log": [x.to_dict() for x in sysops.log]}
+
+
+def serve(sysops):
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except ValueError:
+            resp = {"ok": False, "error": "Запрос не в формате JSON"}
+        else:
+            resp = handle(sysops, req)
+        sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+
+
+def cli_migrate(sysops, quiet):
+    resp = handle(sysops, {"action": "migrate"})
+    if not resp["ok"]:
+        sys.stderr.write("connectfolder: перенос не выполнен: {}\n".format(resp["error"]))
+        return 1
+    rep = core.MigrationReport(**resp["result"])
+    if not (quiet and rep.nothing_to_do):
+        print("connectfolder: " + rep.summary().replace("\n", "\nconnectfolder: "))
+    return 0
+
+
+def main(argv):
+    sysops = make_system()
+    if "--migrate" in argv:
+        return cli_migrate(sysops, "--quiet" in argv)
+    serve(sysops)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
