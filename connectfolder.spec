@@ -1,5 +1,5 @@
 Name:           connectfolder
-Version:        2.0.0
+Version:        3.0.0
 Release:        1%{?dist}
 Summary:        Connect SMB network folders via autofs (GTK 4)
 Summary(ru):    Подключение сетевых каталогов SMB через autofs (GTK 4)
@@ -55,7 +55,7 @@ Migrates configuration of version 0.1.x (/etc/auto.samba, /root/.auth_smb).
 %{_datadir}/polkit-1/actions/io.github.lazermin.connectfolder.policy
 
 %changelog
-* Tue Oct 27 2026 lazermin <itvolna@gmail.com> - 2.0.0-1
+* Tue Oct 27 2026 lazermin <itvolna@gmail.com> - 3.0.0-1
 - Rewrite: GTK 4 UI running as normal user, pkexec helper with whitelisted actions
 - New paths: /etc/auto.connectfolder, /etc/auto.master.d/connectfolder.autofs,
   /etc/connectfolder/credentials (0600); automatic migration from 0.1.x

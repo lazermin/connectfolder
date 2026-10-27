@@ -1,4 +1,4 @@
-# connectfolder 2.0 — подключение сетевых каталогов SMB
+# connectfolder 3.0 — подключение сетевых каталогов SMB
 
 Графическая программа для **РЕД ОС 8** (и других rpm-дистрибутивов с GTK 4):
 добавляет, изменяет и удаляет сетевые каталоги SMB/CIFS, которые **autofs**
@@ -94,9 +94,9 @@ Autofs после изменений **перечитывает** карту (`s
 
 ```bash
 sudo dnf install rpm-build make
-tar xzf connectfolder-2.0.0.tar.gz && cd connectfolder-2.0.0
+tar xzf connectfolder-3.0.0.tar.gz && cd connectfolder-3.0.0
 make rpm
-sudo dnf install ~/rpmbuild/RPMS/noarch/connectfolder-2.0.0-1.*.noarch.rpm
+sudo dnf install ~/rpmbuild/RPMS/noarch/connectfolder-3.0.0-1.*.noarch.rpm
 ```
 
 ### Без установки, из папки
