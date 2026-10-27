@@ -267,7 +267,9 @@ class ShareDialog(Gtk.Window):
         self.win = app_win
         self.original = share
         self.key_touched = share is not None
-        self._setting_key = False
+        # True, пока форма сама меняет поля: сигналы «changed» от этих
+        # изменений не должны снова запускать обработчик.
+        self._updating = False
         self.set_default_size(560, -1)
         close_on_escape(self)
 
@@ -376,7 +378,6 @@ class ShareDialog(Gtk.Window):
 
         for w in (self.path, self.key, self.extra):
             w.connect("changed", self.on_changed)
-        self.key.connect("changed", self.on_key_edited)
         for dd in (self.auth, self.access, self.vers):
             dd.connect("notify::selected", self.on_changed)
         self.ro.connect("toggled", self.on_changed)
@@ -409,11 +410,19 @@ class ShareDialog(Gtk.Window):
 
     # ---- события ----
 
-    def on_key_edited(self, _w):
-        if not self._setting_key:
+    def on_changed(self, *args):
+        if self._updating:
+            return
+        if args and args[0] is self.key:
+            # Пользователь сам правит имя — больше не подставляем его из пути.
             self.key_touched = True
+        self._updating = True
+        try:
+            self._update_form()
+        finally:
+            self._updating = False
 
-    def on_changed(self, *_a):
+    def _update_form(self):
         is_pw = self.auth.get_selected() == 0
         for cap, w in self.cred_rows:
             if cap is not None:
@@ -424,9 +433,9 @@ class ShareDialog(Gtk.Window):
         if not self.key_touched:
             try:
                 _s, sp = core.parse_network_path(self.path.get_text())
-                self._setting_key = True
-                self.key.set_text(core.suggest_key(sp))
-                self._setting_key = False
+                suggested = core.suggest_key(sp)
+                if self.key.get_text() != suggested:
+                    self.key.set_text(suggested)
             except core.ValidationError:
                 pass
         self.key_hint.set_text("Будет доступен как {}/{}".format(
