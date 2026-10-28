@@ -338,7 +338,7 @@ class BrowseDialog(Gtk.Window):
         cancel = Gtk.Button(label="Отмена")
         cancel.connect("clicked", lambda _b: self.close())
         btns.append(cancel)
-        self.choose_btn = Gtk.Button(label="Выбрать")
+        self.choose_btn = Gtk.Button(label="Подключить")
         self.choose_btn.add_css_class("suggested-action")
         self.choose_btn.connect("clicked", lambda _b: self.choose())
         btns.append(self.choose_btn)
@@ -424,8 +424,10 @@ class BrowseDialog(Gtk.Window):
         target = self.selected_path()
         loaded = self.stack.get_visible_child_name() != "loading"
         self.choose_btn.set_sensitive(bool(target) and loaded)
-        self.choose_btn.set_label("Выбрать «{}»".format(target.rpartition("/")[2])
-                                  if target else "Выбрать")
+        # Подпись постоянная, чтобы кнопка не растягивалась под длинные имена;
+        # какой каталог будет подключён, видно в подсказке.
+        self.choose_btn.set_tooltip_text(
+            "//{}/{}".format(self.server, target) if target else None)
 
     def choose(self):
         target = self.selected_path()

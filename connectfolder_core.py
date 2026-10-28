@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Optional, Tuple
 
-VERSION = "3.1.0"
+VERSION = "3.1.1"
 
 # --------------------------------------------------------------------------
 # Пути

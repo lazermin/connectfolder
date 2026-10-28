@@ -1,5 +1,5 @@
 NAME     = connectfolder
-VERSION  = 3.1.0
+VERSION  = 3.1.1
 PREFIX  ?= /usr
 DESTDIR ?=
 PYTHON  ?= python3
