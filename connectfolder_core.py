@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Optional, Tuple
 
-VERSION = "3.1.1"
+VERSION = "3.1.2"
 
 # --------------------------------------------------------------------------
 # Пути
@@ -1180,6 +1180,7 @@ class System:
         self.paths = paths
         self.run_commands = run_commands
         self.log: List[CommandLog] = []
+        self.warnings: List[str] = []
         self._undo: List[Callable[[], None]] = []
 
     # ---- транзакция ----
@@ -1187,6 +1188,7 @@ class System:
     def begin(self) -> None:
         self._undo = []
         self.log = []
+        self.warnings = []
 
     def rollback(self) -> None:
         while self._undo:
@@ -1287,6 +1289,15 @@ class System:
                 entry.cmd, rc, entry.out))
         return entry
 
+    def is_mounted(self, path: str) -> bool:
+        return self.run_commands and is_mounted(path)
+
+    def service_active(self, name: str) -> bool:
+        if not self.run_commands:
+            return True
+        rc, _ = _run(["systemctl", "is-active", "--quiet", name], timeout=5)
+        return rc == 0
+
     def _restorecon(self, path: str) -> None:
         if self.run_commands and shutil.which("restorecon") and os.path.isdir("/sys/fs/selinux"):
             _run(["restorecon", "-F", path], timeout=20)
@@ -1323,9 +1334,7 @@ def ensure_master(sysops: System) -> None:
 
 
 def reload_autofs(sysops: System) -> None:
-    rc, _ = (0, "") if not sysops.run_commands else _run(
-        ["systemctl", "is-active", "--quiet", "autofs"], timeout=5)
-    if rc == 0:
+    if sysops.service_active("autofs"):
         sysops.run(["systemctl", "reload", "autofs"])
     else:
         sysops.run(["systemctl", "enable", "--now", "autofs"])
@@ -1368,6 +1377,8 @@ def save_share(sysops: System, share: Share, creds: Optional[dict],
         raise OperationError("Каталог «{}» уже существует".format(share.key))
 
     old_cred = p.cred_file(original_key) if original_key else None
+    old_cred_text = _read(old_cred) if old_cred else None
+    new_cred_text: Optional[str] = None
     if share.auth == AUTH_PASSWORD:
         creds = creds or {}
         password = creds.get("password")
@@ -1379,6 +1390,7 @@ def save_share(sysops: System, share: Share, creds: Optional[dict],
         text = format_credentials(str(creds.get("username", "")).strip(),
                                   str(password), str(creds.get("domain", "")).strip())
         _write_credentials(sysops, share.key, text)
+        new_cred_text = text
 
     share = replace(share, credentials_path="")
     if old is not None:
@@ -1389,16 +1401,44 @@ def save_share(sysops: System, share: Share, creds: Optional[dict],
 
     if old_cred and (share.key != original_key or share.auth != AUTH_PASSWORD):
         sysops.remove(old_cred)
-    if old is not None and share.key != original_key:
-        _try_umount(sysops, original_key)
     reload_autofs(sysops)
+    if old is not None and original_key:
+        # autofs перечитывает карту, но уже смонтированный каталог не трогает:
+        # старый путь, пароль и опции остаются до таймаута простоя. Поэтому
+        # старое подключение отключаем сами — при следующем обращении autofs
+        # смонтирует каталог уже по новой строке карты.
+        changed = (share.key != original_key
+                   or build_map_line(old) != build_map_line(share)
+                   or old_cred_text != new_cred_text)
+        if changed:
+            release_mount(sysops, original_key)
     return share
 
 
-def _try_umount(sysops: System, key: str) -> None:
+def release_mount(sysops: System, key: str) -> None:
+    """Отключить смонтированный каталог. Предупреждения — в sysops.warnings.
+
+    Если каталог занят (открыт в файловом менеджере, терминале, программе),
+    обычный umount не пройдёт — тогда отключаем отложенно (umount -l):
+    новые обращения сразу пойдут на новое подключение, а программы, которые
+    держат старые файлы, дорабатывают с ними до закрытия.
+    """
     mp = sysops.paths.mount_point(key)
-    if sysops.run_commands and is_mounted(mp):
-        sysops.run(["umount", mp], check=False)
+    if not sysops.is_mounted(mp):
+        return
+    if sysops.run(["umount", mp], check=False).rc == 0:
+        return
+    if sysops.run(["umount", "-l", mp], check=False).rc == 0:
+        sysops.warnings.append(
+            "Каталог {} был открыт в какой-то программе, поэтому старое подключение "
+            "отключено отложенно. Новые обращения уже идут по новым настройкам, а "
+            "программы, открывшие файлы раньше, работают со старыми, пока их не закроют."
+            .format(mp))
+        return
+    sysops.warnings.append(
+        "Не удалось отключить старое подключение {}: оно сменится на новое после "
+        "5 минут простоя или после перезагрузки. Вручную: sudo umount -l {}"
+        .format(mp, mp))
 
 
 def remove_share(sysops: System, key: str) -> None:
@@ -1410,8 +1450,8 @@ def remove_share(sysops: System, key: str) -> None:
     mf.remove(key)
     sysops.write(p.map_file, mf.render(), 0o644, backup=True)
     sysops.remove(p.cred_file(key))
-    _try_umount(sysops, key)
     reload_autofs(sysops)
+    release_mount(sysops, key)
 
 
 def probe_with_saved_credentials(paths: Paths, share: Share, key: str,

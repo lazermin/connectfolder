@@ -286,6 +286,100 @@ class TestOperations(RootCase):
         self.assertEqual([s.key for s in st.shares], ["docs"])
 
 
+class FakeSystem(core.System):
+    """System с подменёнными командами: каталог «смонтирован», umount отвечает
+    заданными кодами."""
+
+    def __init__(self, paths, umount_rc=(0,), mounted=True):
+        super().__init__(paths, run_commands=True)
+        self.umount_rc = list(umount_rc)
+        self.mounted = mounted
+        self.cmds = []
+
+    def run(self, cmd, check=True):
+        self.cmds.append(" ".join(cmd))
+        rc = self.umount_rc.pop(0) if cmd[0] == "umount" and self.umount_rc else 0
+        entry = core.CommandLog(" ".join(cmd), rc)
+        self.log.append(entry)
+        return entry
+
+    def is_mounted(self, path):
+        return self.mounted
+
+    def service_active(self, name):
+        return True
+
+    def _restorecon(self, path):
+        pass
+
+
+class TestRemount(RootCase):
+    def setUp(self):
+        super().setUp()
+        self.op(core.save_share, core.Share("docs", "fs", "docs"),
+                {"username": "u", "password": "p"}, None)
+
+    def save(self, sysops, share, creds, key="docs"):
+        sysops.begin()
+        core.save_share(sysops, share, creds, key)
+        sysops.commit()
+        return sysops
+
+    def umounts(self, sysops):
+        return [c for c in sysops.cmds if c.startswith("umount")]
+
+    def test_path_change_remounts(self):
+        fs = self.save(FakeSystem(self.paths), core.Share("docs", "fs", "docs/2024"),
+                       {"username": "u", "password": None})
+        mp = self.paths.mount_point("docs")
+        self.assertEqual(self.umounts(fs), ["umount " + mp])
+        # Сначала autofs перечитывает карту, потом отключается старое подключение.
+        self.assertLess(fs.cmds.index("systemctl reload autofs"), fs.cmds.index("umount " + mp))
+        self.assertEqual(fs.warnings, [])
+
+    def test_password_change_remounts(self):
+        fs = self.save(FakeSystem(self.paths), core.Share("docs", "fs", "docs"),
+                       {"username": "u", "password": "new"})
+        self.assertEqual(len(self.umounts(fs)), 1)
+
+    def test_nothing_changed_keeps_mount(self):
+        fs = self.save(FakeSystem(self.paths), core.Share("docs", "fs", "docs"),
+                       {"username": "u", "password": None})
+        self.assertEqual(self.umounts(fs), [])
+
+    def test_not_mounted(self):
+        fs = self.save(FakeSystem(self.paths, mounted=False),
+                       core.Share("docs", "fs", "other"), {"username": "u", "password": None})
+        self.assertEqual(self.umounts(fs), [])
+
+    def test_busy_lazy_umount_warns(self):
+        fs = self.save(FakeSystem(self.paths, umount_rc=(32, 0)),
+                       core.Share("docs", "fs", "other"), {"username": "u", "password": None})
+        mp = self.paths.mount_point("docs")
+        self.assertEqual(self.umounts(fs), ["umount " + mp, "umount -l " + mp])
+        self.assertEqual(len(fs.warnings), 1)
+        self.assertIn("отложенно", fs.warnings[0])
+
+    def test_umount_fails_warns(self):
+        fs = self.save(FakeSystem(self.paths, umount_rc=(32, 32)),
+                       core.Share("docs", "fs", "other"), {"username": "u", "password": None})
+        self.assertIn("Не удалось отключить", fs.warnings[0])
+        # Настройки всё равно сохранены.
+        self.assertIn("://fs/other", read(self.paths.map_file))
+
+    def test_rename_releases_old_point(self):
+        fs = self.save(FakeSystem(self.paths), core.Share("docs2", "fs", "docs"),
+                       {"username": "u", "password": None})
+        self.assertEqual(self.umounts(fs), ["umount " + self.paths.mount_point("docs")])
+
+    def test_remove_releases(self):
+        fs = FakeSystem(self.paths)
+        fs.begin()
+        core.remove_share(fs, "docs")
+        fs.commit()
+        self.assertEqual(self.umounts(fs), ["umount " + self.paths.mount_point("docs")])
+
+
 class TestMigration(RootCase):
     seed_old = True
 

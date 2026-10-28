@@ -84,12 +84,12 @@ def action_save(sysops, params):
     if orig is not None and not isinstance(orig, str):
         raise core.ValidationError("Неверный original_key")
     saved = core.save_share(sysops, share, _creds_param(params), orig or None)
-    return {"share": saved.to_dict()}
+    return {"share": saved.to_dict(), "warnings": list(sysops.warnings)}
 
 
 def action_remove(sysops, params):
     core.remove_share(sysops, _require_str(params, "key"))
-    return {}
+    return {"warnings": list(sysops.warnings)}
 
 
 def action_migrate(sysops, params):

@@ -1067,6 +1067,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 return
             dlg.close()
             self.log("сохранено: {}".format(share.key))
+            self.show_warnings("Каталог «{}» сохранён".format(share.key), res)
             self.refresh()
         self.helper_call("save", done, share=share.to_dict(), credentials=creds,
                          original_key=original_key)
@@ -1076,9 +1077,11 @@ class MainWindow(Gtk.ApplicationWindow):
             if rid != "delete":
                 return
 
-            def done(_res, err):
+            def done(res, err):
                 if err is not None:
                     self.error_dialog("Не удалось удалить каталог", err)
+                else:
+                    self.show_warnings("Каталог «{}» отключён".format(share.key), res)
                 self.refresh()
             self.helper_call("remove", done, key=share.key)
         message_dialog(
@@ -1126,6 +1129,14 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.error_dialog("Не удалось настроить autofs", err)
             self.refresh()
         self.helper_call("setup", done)
+
+    def show_warnings(self, title, result):
+        warnings = (result or {}).get("warnings") or []
+        for w in warnings:
+            self.log("внимание: " + w)
+        if warnings:
+            message_dialog(self, title, "\n\n".join(warnings), [("ok", "Понятно")],
+                           lambda _r: None)
 
     def error_dialog(self, title, err):
         message_dialog(self, title, str(err), [("ok", "Закрыть")], lambda _r: None)
