@@ -480,7 +480,7 @@ class TestSmbProbe(unittest.TestCase):
         self.assertEqual(argv[argv.index("-D") + 1], "Отдел продаж")
         self.assertIn("--option=client min protocol=NT1", argv)
         self.assertIn("--option=client max protocol=NT1", argv)
-        self.assertEqual(argv[-2:], ["-c", "ls ."])
+        self.assertEqual(argv[-2:], ["-c", "ls " + core.PROBE_MASK])
         self.assertNotIn("P%ss word", " ".join(argv))
         self.assertEqual(log["auth"]["text"],
                          "username=ivanov\npassword=P%ss word\ndomain=CORP\n")
@@ -518,13 +518,21 @@ class TestSmbProbe(unittest.TestCase):
             ("protocol negotiation failed: NT_STATUS_CONNECTION_RESET\n", 1, "версия SMB"),
             ("NT_STATUS_SOMETHING_NEW\n", 1, "NT_STATUS_SOMETHING_NEW"),
             ("  .   D  0  Mon Oct 27\n", 0, "Шара открывается"),
+            # Обычный ответ Samba на поиск несуществующего имени — это успех.
+            ("NT_STATUS_NO_SUCH_FILE listing \\connectfolder-probe-7f3a9c\n", 1,
+             "Шара открывается"),
+            # Подкаталога нет: первая ошибка — от -D, а не от поиска.
+            ("cd \\2024\\отчёты\\: NT_STATUS_OBJECT_PATH_NOT_FOUND\n"
+             "NT_STATUS_NO_SUCH_FILE listing \\connectfolder-probe-7f3a9c\n", 1,
+             "Каталога «2024/отчёты» нет"),
         ]
         for out, rc, expect in cases:
             os.environ["FAKE_SMB_OUT"] = out
             os.environ["FAKE_SMB_RC"] = str(rc)
             st, text = core.probe_share(sh, {"username": "u", "password": "p"})
             self.assertIn(expect, text, out)
-            self.assertEqual(st, core.STATUS_OK if rc == 0 else core.STATUS_FAIL, out)
+            ok_expected = expect == "Шара открывается"
+            self.assertEqual(st, core.STATUS_OK if ok_expected else core.STATUS_FAIL, out)
 
     def test_server_down_skips_smbclient(self):
         core.tcp_check = lambda host, port=445, timeout=3.0: (False, "нет ответа на порту 445")

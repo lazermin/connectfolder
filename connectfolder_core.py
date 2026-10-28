@@ -844,6 +844,8 @@ _KRB_HINTS = [
     ("Clock skew too great", "часы компьютера расходятся с контроллером домена"),
 ]
 
+PROBE_MASK = "connectfolder-probe-7f3a9c"
+
 _kerberos_flag_cache: Optional[List[str]] = None
 
 
@@ -899,9 +901,12 @@ def build_smbclient_cmd(share: Share, auth_file: Optional[str] = None,
     if subdir:
         # -D, а не «cd» внутри -c: имя каталога не разбирается как команды.
         cmd += ["-D", subdir]
-    # «ls .» читает только сам каталог: быстро даже для больших шар,
-    # но права на чтение всё равно проверяются.
-    cmd += ["-c", "ls ."]
+    # Поиск по имени, которого заведомо нет: сервер должен открыть каталог
+    # на чтение (иначе NT_STATUS_ACCESS_DENIED), но перебирать его целиком
+    # не нужно — проверка быстрая даже для больших шар. Ответ «нет такого
+    # файла» (NT_STATUS_NO_SUCH_FILE) и есть успешный результат.
+    # Маска «.» для этого не годится: в корне шары Samba не отдаёт запись «.».
+    cmd += ["-c", "ls " + PROBE_MASK]
     return cmd
 
 
@@ -912,6 +917,10 @@ def interpret_smbclient(rc: int, out: str, share: Share) -> Tuple[str, str]:
         if needle in out:
             return STATUS_FAIL, text
     m = re.search(r"NT_STATUS_[A-Z_]+", out)
+    if m and m.group(0) == "NT_STATUS_NO_SUCH_FILE":
+        # Первая ошибка — от поиска несуществующего имени: подключение,
+        # вход и переход в каталог прошли, каталог читается.
+        return STATUS_OK, "шара открывается, каталог читается"
     if m:
         code = m.group(0)
         if code in _NT_STATUS_TEXT:
