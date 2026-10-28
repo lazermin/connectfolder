@@ -97,6 +97,27 @@ def action_migrate(sysops, params):
     return rep.to_dict()
 
 
+def action_probe(sysops, params):
+    """Проверка шары с паролем из сохранённого файла учётных данных.
+
+    Нужна, когда пароль в форме не меняли (интерфейс его не знает) и чтобы
+    узнать, почему не смонтировался каталог из списка. Пароль наружу не
+    отдаётся — только итог проверки.
+    """
+    share = core.Share.from_dict(params.get("share"))
+    key = _require_str(params, "key")
+    overrides = {}
+    for k in ("username", "domain"):
+        v = params.get(k)
+        if v is not None:
+            if not isinstance(v, str):
+                raise core.ValidationError("Неверное поле {}".format(k))
+            overrides[k] = v.strip()
+    status, text = core.probe_with_saved_credentials(
+        sysops.paths, share, key, demo=not sysops.paths.is_real, **overrides)
+    return {"status": status, "text": text}
+
+
 def action_setup(sysops, params):
     core.ensure_master(sysops)
     core.reload_autofs(sysops)
@@ -110,6 +131,7 @@ ACTIONS = {
     "remove": (action_remove, True),
     "migrate": (action_migrate, True),
     "setup": (action_setup, True),
+    "probe": (action_probe, False),
 }
 
 

@@ -22,6 +22,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -754,6 +755,10 @@ def check_share(share: Share, paths: Paths, demo: bool = False,
         return STATUS_WARN, "Нет билета Kerberos (выполните kinit или войдите заново)"
 
     mp = paths.mount_point(share.key)
+    if not os.path.isdir(mp):
+        # С --ghost autofs создаёт каталоги для всех ключей карты сам.
+        return STATUS_FAIL, ("autofs не знает этот каталог: служба не запущена "
+                             "или карта не перечитана")
     result: Dict[str, object] = {}
 
     def probe():
@@ -771,13 +776,221 @@ def check_share(share: Share, paths: Paths, demo: bool = False,
     err = result.get("err")
     if err is None:
         return STATUS_OK, "Доступен, объектов: {}".format(result["n"])
-    if isinstance(err, FileNotFoundError):
-        return STATUS_FAIL, "Нет точки монтирования — autofs не подхватил карту"
+    # autofs не передаёт причину ошибки монтирования: чаще всего это просто
+    # «нет такого файла». Для Kerberos причину можно узнать сразу — smbclient
+    # работает с билетом пользователя. Для входа по паролю файл учётных
+    # данных доступен только root, поэтому причину выясняет помощник.
+    if share.auth == AUTH_KERBEROS and smbclient_available():
+        st, why = smb_probe(share)
+        if st != STATUS_OK:
+            return STATUS_FAIL, "Не смонтирован: " + why
+        return STATUS_FAIL, "Сервер пускает, но autofs не смонтировал каталог (см. journalctl -u autofs)"
     if isinstance(err, PermissionError):
-        return STATUS_FAIL, "Нет доступа: проверьте имя пользователя и пароль"
+        return STATUS_FAIL, "Нет доступа к каталогу"
     if isinstance(err, OSError):
-        return STATUS_FAIL, "Не смонтирован: {}".format(err.strerror or err)
+        return STATUS_FAIL, "Не смонтирован ({})".format(err.strerror or err)
     return STATUS_FAIL, str(err)
+
+
+# --------------------------------------------------------------------------
+# Проверка шары через smbclient (пакет samba-client)
+# --------------------------------------------------------------------------
+
+SMBCLIENT = "smbclient"
+
+# Версия в карте → имя протокола Samba.
+_SMB_PROTOCOLS = {"1.0": "NT1", "2.0": "SMB2_02", "2.1": "SMB2_10",
+                  "3.0": "SMB3_00", "3.1.1": "SMB3_11"}
+
+# Коды ошибок SMB → понятное пояснение. Порядок не важен, берётся первый
+# код, встреченный в выводе smbclient.
+_NT_STATUS_TEXT = {
+    "NT_STATUS_BAD_NETWORK_NAME": "шары «{share}» нет на сервере",
+    "NT_STATUS_LOGON_FAILURE": "неверное имя пользователя или пароль",
+    "NT_STATUS_WRONG_PASSWORD": "неверный пароль",
+    "NT_STATUS_NO_SUCH_USER": "нет такого пользователя",
+    "NT_STATUS_ACCOUNT_LOCKED_OUT": "учётная запись заблокирована",
+    "NT_STATUS_ACCOUNT_DISABLED": "учётная запись отключена",
+    "NT_STATUS_PASSWORD_EXPIRED": "срок действия пароля истёк",
+    "NT_STATUS_PASSWORD_MUST_CHANGE": "нужно сменить пароль",
+    "NT_STATUS_ACCOUNT_RESTRICTION": "вход запрещён ограничениями учётной записи",
+    "NT_STATUS_INVALID_LOGON_HOURS": "вход в это время запрещён",
+    "NT_STATUS_ACCESS_DENIED": "нет прав на шару или каталог",
+    "NT_STATUS_OBJECT_NAME_NOT_FOUND": "каталога «{subdir}» нет в шаре",
+    "NT_STATUS_OBJECT_PATH_NOT_FOUND": "каталога «{subdir}» нет в шаре",
+    "NT_STATUS_NOT_A_DIRECTORY": "«{subdir}» — не каталог",
+    "NT_STATUS_CONNECTION_REFUSED": "сервер отклонил подключение",
+    "NT_STATUS_HOST_UNREACHABLE": "сервер недоступен",
+    "NT_STATUS_NETWORK_UNREACHABLE": "сеть недоступна",
+    "NT_STATUS_IO_TIMEOUT": "сервер не ответил вовремя",
+    "NT_STATUS_CONNECTION_RESET": "сервер сбросил подключение (возможно, не та версия SMB)",
+    "NT_STATUS_CONNECTION_DISCONNECTED": "сервер разорвал подключение (возможно, не та версия SMB)",
+    "NT_STATUS_INVALID_NETWORK_RESPONSE": "сервер не поддерживает выбранную версию SMB",
+    "NT_STATUS_NOT_SUPPORTED": "сервер не поддерживает выбранную версию SMB или способ входа",
+    "NT_STATUS_INVALID_PARAMETER": "сервер отверг параметры подключения",
+    "NT_STATUS_NO_LOGON_SERVERS": "нет связи с контроллером домена",
+    "NT_STATUS_TRUSTED_RELATIONSHIP_FAILURE": "нарушено доверие с доменом",
+    "NT_STATUS_TIME_DIFFERENCE_AT_DC": "часы компьютера расходятся с контроллером домена",
+    "NT_STATUS_MORE_PROCESSING_REQUIRED": "не удалось договориться о способе входа",
+    "NT_STATUS_NO_MEMORY": "smbclient: не хватило памяти",
+}
+
+_KRB_HINTS = [
+    ("Ticket expired", "срок действия билета Kerberos истёк, выполните kinit"),
+    ("No credentials cache", "нет билета Kerberos, выполните kinit"),
+    ("No Kerberos credentials", "нет билета Kerberos, выполните kinit"),
+    ("Server not found in Kerberos database",
+     "сервер не зарегистрирован в домене: укажите полное имя (FQDN), а не IP-адрес или короткое имя"),
+    ("Clock skew too great", "часы компьютера расходятся с контроллером домена"),
+]
+
+_kerberos_flag_cache: Optional[List[str]] = None
+
+
+def smbclient_available() -> bool:
+    return shutil.which(SMBCLIENT) is not None
+
+
+def _kerberos_flags() -> List[str]:
+    """Ключ smbclient для входа по билету Kerberos.
+
+    Samba 4.15+ понимает --use-kerberos=required (вход только по Kerberos,
+    без отката на NTLM); в старых версиях есть только -k.
+    """
+    global _kerberos_flag_cache
+    if _kerberos_flag_cache is None:
+        _rc, out = _run([SMBCLIENT, "--help"], timeout=10)
+        _kerberos_flag_cache = (["--use-kerberos=required"] if "--use-kerberos" in out
+                                else ["-k"])
+    return list(_kerberos_flag_cache)
+
+
+def is_ip_address(host: str) -> bool:
+    try:
+        socket.inet_pton(socket.AF_INET, host)
+        return True
+    except OSError:
+        pass
+    try:
+        socket.inet_pton(socket.AF_INET6, host)
+        return True
+    except OSError:
+        return False
+
+
+def build_smbclient_cmd(share: Share, auth_file: Optional[str] = None,
+                        kerberos_flags: Optional[List[str]] = None) -> List[str]:
+    """Команда проверки шары. Пароль передаётся только через auth_file."""
+    validate_share(share)
+    parts = share.share_path.split("/")
+    cmd = [SMBCLIENT, "//{}/{}".format(share.server, parts[0]), "-t", "15"]
+    if share.auth == AUTH_KERBEROS:
+        cmd += kerberos_flags if kerberos_flags is not None else _kerberos_flags()
+    else:
+        if not auth_file:
+            raise ValueError("auth_file обязателен для входа по паролю")
+        cmd += ["-A", auth_file]
+    proto = _SMB_PROTOCOLS.get(share.smb_version)
+    if proto:
+        # Ровно выбранная версия: так проверка покажет, если сервер её не умеет.
+        cmd += ["--option=client min protocol=" + proto,
+                "--option=client max protocol=" + proto]
+    subdir = "/".join(parts[1:])
+    if subdir:
+        # -D, а не «cd» внутри -c: имя каталога не разбирается как команды.
+        cmd += ["-D", subdir]
+    # «ls .» читает только сам каталог: быстро даже для больших шар,
+    # но права на чтение всё равно проверяются.
+    cmd += ["-c", "ls ."]
+    return cmd
+
+
+def interpret_smbclient(rc: int, out: str, share: Share) -> Tuple[str, str]:
+    parts = share.share_path.split("/")
+    fmt = {"share": parts[0], "subdir": "/".join(parts[1:]) or parts[0]}
+    for needle, text in _KRB_HINTS:
+        if needle in out:
+            return STATUS_FAIL, text
+    m = re.search(r"NT_STATUS_[A-Z_]+", out)
+    if m:
+        code = m.group(0)
+        if code in _NT_STATUS_TEXT:
+            return STATUS_FAIL, _NT_STATUS_TEXT[code].format(**fmt)
+        return STATUS_FAIL, "ошибка SMB {}".format(code)
+    if "protocol negotiation failed" in out:
+        return STATUS_FAIL, "сервер не поддерживает выбранную версию SMB"
+    if rc == 0:
+        return STATUS_OK, "шара открывается, каталог читается"
+    last = out.strip().splitlines()[-1] if out.strip() else ""
+    return STATUS_FAIL, "smbclient завершился с кодом {}{}".format(
+        rc, ": " + last if last else "")
+
+
+def smb_probe(share: Share, credentials: Optional[Dict[str, str]] = None,
+              auth_file: Optional[str] = None, timeout: float = 30.0) -> Tuple[str, str]:
+    """Проверить шару через smbclient от имени текущего процесса.
+
+    Kerberos — билет текущего пользователя (KRB5CCNAME или кэш по умолчанию).
+    Пароль — либо готовый auth_file (помощник передаёт файл учётных данных),
+    либо credentials: тогда пишется временный файл с правами 0600, который
+    удаляется сразу после проверки. В командную строку пароль не попадает.
+    """
+    if not smbclient_available():
+        return STATUS_UNKNOWN, "не установлен samba-client (smbclient)"
+    if share.auth == AUTH_KERBEROS and is_ip_address(share.server):
+        return STATUS_WARN, ("для Kerberos укажите имя сервера (FQDN), а не IP-адрес: "
+                             "по IP билет не выдаётся")
+    tmp_path = None
+    try:
+        if share.auth == AUTH_PASSWORD and auth_file is None:
+            c = credentials or {}
+            text = format_credentials(c.get("username", ""), c.get("password", ""),
+                                      c.get("domain", ""))
+            tmp_dir = os.environ.get("XDG_RUNTIME_DIR")
+            if not tmp_dir or not os.path.isdir(tmp_dir):
+                tmp_dir = None
+            fd, tmp_path = tempfile.mkstemp(prefix="connectfolder-", dir=tmp_dir)
+            try:
+                os.fchmod(fd, 0o600)
+                os.write(fd, text.encode("utf-8"))
+            finally:
+                os.close(fd)
+            auth_file = tmp_path
+        cmd = build_smbclient_cmd(share, auth_file)
+        env = dict(os.environ, LC_ALL="C", LANG="C")
+        for k in ("PASSWD", "PASSWD_FD", "PASSWD_FILE"):
+            env.pop(k, None)
+        try:
+            p = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, universal_newlines=True,
+                               timeout=timeout, env=env)
+        except subprocess.TimeoutExpired:
+            return STATUS_FAIL, "сервер не ответил за {} с".format(int(timeout))
+        return interpret_smbclient(p.returncode, p.stdout, share)
+    except ValidationError as e:
+        return STATUS_FAIL, str(e)
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def probe_share(share: Share, credentials: Optional[Dict[str, str]] = None,
+                demo: bool = False) -> Tuple[str, str]:
+    """Полная проверка перед сохранением: порт, затем smbclient."""
+    if demo:
+        return STATUS_UNKNOWN, "демо-режим: сеть не проверяется"
+    ok, msg = tcp_check(share.server)
+    if not ok:
+        return STATUS_FAIL, "Сервер недоступен: " + msg
+    if share.auth == AUTH_KERBEROS and not has_kerberos_ticket():
+        return STATUS_WARN, "Нет билета Kerberos (выполните kinit или войдите заново)"
+    st, why = smb_probe(share, credentials)
+    if st == STATUS_UNKNOWN:
+        return STATUS_WARN, "Порт 445 открыт, шару проверить нельзя: " + why
+    return st, why[:1].upper() + why[1:]
 
 
 # --------------------------------------------------------------------------
@@ -1041,6 +1254,37 @@ def remove_share(sysops: System, key: str) -> None:
     sysops.remove(p.cred_file(key))
     _try_umount(sysops, key)
     reload_autofs(sysops)
+
+
+def probe_with_saved_credentials(paths: Paths, share: Share, key: str,
+                                 username: Optional[str] = None,
+                                 domain: Optional[str] = None,
+                                 demo: bool = False) -> Tuple[str, str]:
+    """Проверка с паролем из файла учётных данных (выполняет помощник от root).
+
+    username/domain — значения из формы, если их поменяли, а пароль — нет.
+    """
+    validate_key(key)
+    validate_share(share)
+    if share.auth != AUTH_PASSWORD:
+        raise ValidationError("Проверка с сохранённым паролем — только для входа по паролю")
+    text = _read(paths.cred_file(key))
+    if text is None:
+        raise OperationError("Нет сохранённого пароля для «{}»: введите его в форме".format(key))
+    c = parse_credentials(text)
+    if username is not None:
+        c["username"] = username
+    if domain is not None:
+        c["domain"] = domain
+    if demo:
+        return STATUS_UNKNOWN, "демо-режим: сеть не проверяется"
+    ok, msg = tcp_check(share.server)
+    if not ok:
+        return STATUS_FAIL, "Сервер недоступен: " + msg
+    st, why = smb_probe(share, c)
+    if st == STATUS_UNKNOWN:
+        return STATUS_WARN, "Порт 445 открыт, шару проверить нельзя: " + why
+    return st, why[:1].upper() + why[1:]
 
 
 # --------------------------------------------------------------------------

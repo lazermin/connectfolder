@@ -192,6 +192,13 @@ class ShareRow(Gtk.ListBoxRow):
             tags.append(t)
         self.status_label = label("", "dim-label", wrap=True)
         tags.append(self.status_label)
+        self.why_btn = Gtk.Button(label="Узнать причину",
+                                  tooltip_text="Проверить подключение с сохранённым паролем "
+                                               "(нужны права администратора)")
+        self.why_btn.add_css_class("flat")
+        self.why_btn.set_visible(False)
+        self.why_btn.connect("clicked", lambda _b: self.win.diagnose_row(self))
+        tags.append(self.why_btn)
         grid.attach(tags, 1, 2, 1, 1)
 
         buttons = Gtk.Box(spacing=4, valign=Gtk.Align.CENTER, hexpand=True,
@@ -226,7 +233,8 @@ class ShareRow(Gtk.ListBoxRow):
             out.append(("только чтение", False))
         return out
 
-    def set_status(self, status, text):
+    def set_status(self, status, text, offer_diagnosis=False):
+        self.why_btn.set_visible(offer_diagnosis)
         if status == core.STATUS_CHECKING:
             self.status_stack.set_visible_child_name("spin")
             self.spinner.start()
@@ -340,7 +348,9 @@ class ShareDialog(Gtk.Window):
         outer.append(self.error)
 
         btns = Gtk.Box(spacing=8)
-        self.test_btn = Gtk.Button(label="Проверить сервер")
+        self.test_btn = Gtk.Button(label="Проверить подключение",
+                                   tooltip_text="Подключиться к шаре с этими настройками "
+                                                "и прочитать каталог")
         self.test_btn.connect("clicked", self.on_test)
         btns.append(self.test_btn)
         self.test_label = label("", "dim-label", wrap=True)
@@ -464,18 +474,48 @@ class ShareDialog(Gtk.Window):
 
     def on_test(self, _b):
         try:
-            server, _ = core.parse_network_path(self.path.get_text())
+            sh = self.collect()
         except core.ValidationError as e:
-            self.test_label.set_text(str(e))
+            self.test_label.set_text("✘ " + str(e))
             return
         self.test_btn.set_sensitive(False)
-        self.test_label.set_text("проверка {}…".format(server))
+        self.test_label.set_text("проверка {}…".format(sh.unc))
 
-        def done(res, err):
+        def show(status, text):
             self.test_btn.set_sensitive(True)
-            ok, msg = res if res else (False, str(err))
-            self.test_label.set_text(("✔ " if ok else "✘ ") + "{}: {}".format(server, msg))
-        run_async(core.tcp_check, done, server)
+            mark = {core.STATUS_OK: "✔ ", core.STATUS_FAIL: "✘ "}.get(status, "⚠ ")
+            self.test_label.set_text(mark + text)
+
+        def done_local(res, err):
+            if err is not None:
+                show(core.STATUS_FAIL, str(err))
+            else:
+                show(*res)
+
+        if sh.auth == core.AUTH_KERBEROS:
+            # От имени пользователя, с его билетом Kerberos.
+            run_async(core.probe_share, done_local, sh, None, self.win.demo)
+            return
+
+        user = self.user.get_text().strip()
+        domain = self.domain.get_text().strip()
+        pw = self.pass_.get_text()
+        if (pw == "" and self.original is not None
+                and self.original.auth == core.AUTH_PASSWORD):
+            # Пароль не меняли — интерфейс его не знает, проверяет помощник.
+            def done_helper(res, err):
+                if err is not None:
+                    show(core.STATUS_FAIL, str(err))
+                else:
+                    show(res["status"], res["text"])
+            self.win.helper_call("probe", done_helper, key=self.original.key,
+                                 share=sh.to_dict(), username=user, domain=domain)
+            return
+        if not user:
+            show(core.STATUS_FAIL, "Укажите имя пользователя")
+            return
+        run_async(core.probe_share, done_local, sh,
+                  {"username": user, "password": pw, "domain": domain}, self.win.demo)
 
     def on_save(self, _b):
         try:
@@ -740,9 +780,33 @@ class MainWindow(Gtk.ApplicationWindow):
                 return
             if err is not None:
                 row.set_status(core.STATUS_FAIL, str(err))
-            else:
-                row.set_status(*res)
+                return
+            status, text = res
+            # Для входа по паролю причину сбоя монтирования знает только
+            # помощник: файл учётных данных доступен лишь root.
+            offer = (status == core.STATUS_FAIL and not self.demo
+                     and row.share.auth == core.AUTH_PASSWORD
+                     and text.startswith("Не смонтирован"))
+            row.set_status(status, text, offer_diagnosis=offer)
         run_async(work, done)
+
+    def diagnose_row(self, row):
+        row.set_status(core.STATUS_CHECKING, "")
+
+        def done(res, err):
+            if row.get_parent() is None:
+                return
+            if err is not None:
+                row.set_status(core.STATUS_FAIL, "Проверка не выполнена: {}".format(err),
+                               offer_diagnosis=True)
+            else:
+                st = res["status"]
+                text = res["text"]
+                if st == core.STATUS_OK:
+                    st, text = core.STATUS_WARN, ("Сервер пускает с этим паролем, но autofs "
+                                                  "не смонтировал каталог (см. journalctl -u autofs)")
+                row.set_status(st, text)
+        self.helper_call("probe", done, key=row.share.key, share=row.share.to_dict())
 
     def open_folder(self, share):
         path = self.paths.mount_point(share.key)

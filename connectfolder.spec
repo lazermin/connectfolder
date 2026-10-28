@@ -17,6 +17,7 @@ Requires:       python3-gobject
 Requires:       gtk4 >= 4.6
 Requires:       autofs
 Requires:       cifs-utils
+Requires:       samba-client
 Requires:       polkit
 
 %description

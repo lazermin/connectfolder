@@ -421,5 +421,140 @@ class TestHelper(RootCase):
             c.close()
 
 
+FAKE_SMBCLIENT = r"""#!{python}
+import json, os, sys
+args = sys.argv[1:]
+if "--help" in args:
+    print(os.environ.get("FAKE_SMB_HELP", "--use-kerberos=desired|required|off"))
+    sys.exit(0)
+auth = None
+if "-A" in args:
+    with open(args[args.index("-A") + 1]) as f:
+        auth = {{"text": f.read(), "mode": oct(os.stat(f.name).st_mode & 0o777)}}
+with open(os.environ["FAKE_SMB_LOG"], "w") as f:
+    json.dump({{"argv": args, "auth": auth}}, f)
+sys.stdout.write(os.environ.get("FAKE_SMB_OUT", ""))
+sys.exit(int(os.environ.get("FAKE_SMB_RC", "0")))
+"""
+
+
+class TestSmbProbe(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = self.tmp.name
+        exe = os.path.join(d, "smbclient")
+        with open(exe, "w") as f:
+            f.write(FAKE_SMBCLIENT.format(python=sys.executable))
+        os.chmod(exe, 0o755)
+        self.log = os.path.join(d, "log.json")
+        self.env_backup = dict(os.environ)
+        os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+        os.environ["FAKE_SMB_LOG"] = self.log
+        os.environ["XDG_RUNTIME_DIR"] = d
+        core._kerberos_flag_cache = None
+        self.tcp = core.tcp_check
+        self.klist = core.has_kerberos_ticket
+        core.tcp_check = lambda host, port=445, timeout=3.0: (True, "порт открыт")
+        core.has_kerberos_ticket = lambda: True
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.env_backup)
+        core.tcp_check = self.tcp
+        core.has_kerberos_ticket = self.klist
+        core._kerberos_flag_cache = None
+        self.tmp.cleanup()
+
+    def logged(self):
+        with open(self.log) as f:
+            return json.load(f)
+
+    def test_password_probe_uses_temp_auth_file(self):
+        sh = core.Share("docs", "fs", "docs/Отдел продаж", smb_version="1.0")
+        st, text = core.probe_share(sh, {"username": "ivanov", "password": "P%ss word",
+                                         "domain": "CORP"})
+        self.assertEqual(st, core.STATUS_OK, text)
+        log = self.logged()
+        argv = log["argv"]
+        self.assertEqual(argv[0], "//fs/docs")
+        self.assertEqual(argv[argv.index("-D") + 1], "Отдел продаж")
+        self.assertIn("--option=client min protocol=NT1", argv)
+        self.assertIn("--option=client max protocol=NT1", argv)
+        self.assertEqual(argv[-2:], ["-c", "ls ."])
+        self.assertNotIn("P%ss word", " ".join(argv))
+        self.assertEqual(log["auth"]["text"],
+                         "username=ivanov\npassword=P%ss word\ndomain=CORP\n")
+        self.assertEqual(log["auth"]["mode"], "0o600")
+        auth_path = argv[argv.index("-A") + 1]
+        self.assertFalse(os.path.exists(auth_path), "временный файл не удалён")
+        self.assertTrue(auth_path.startswith(self.tmp.name))
+
+    def test_kerberos_flags(self):
+        sh = core.Share("k", "dc1.corp.local", "otdel", auth=core.AUTH_KERBEROS)
+        core.probe_share(sh)
+        argv = self.logged()["argv"]
+        self.assertIn("--use-kerberos=required", argv)
+        self.assertNotIn("-A", argv)
+        core._kerberos_flag_cache = None
+        os.environ["FAKE_SMB_HELP"] = "-k, --kerberos"
+        core.probe_share(sh)
+        self.assertIn("-k", self.logged()["argv"])
+
+    def test_kerberos_by_ip_warns(self):
+        sh = core.Share("k", "10.0.0.5", "otdel", auth=core.AUTH_KERBEROS)
+        st, text = core.probe_share(sh)
+        self.assertEqual(st, core.STATUS_WARN)
+        self.assertIn("FQDN", text)
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_error_messages(self):
+        sh = core.Share("docs", "fs", "public/2024/отчёты")
+        cases = [
+            ("tree connect failed: NT_STATUS_BAD_NETWORK_NAME\n", 1, "Шары «public» нет"),
+            ("session setup failed: NT_STATUS_LOGON_FAILURE\n", 1, "Неверное имя пользователя"),
+            ("cd \\2024\\отчёты\\: NT_STATUS_OBJECT_NAME_NOT_FOUND\n", 1,
+             "Каталога «2024/отчёты» нет"),
+            ("NT_STATUS_ACCESS_DENIED listing \\*\n", 1, "Нет прав"),
+            ("protocol negotiation failed: NT_STATUS_CONNECTION_RESET\n", 1, "версия SMB"),
+            ("NT_STATUS_SOMETHING_NEW\n", 1, "NT_STATUS_SOMETHING_NEW"),
+            ("  .   D  0  Mon Oct 27\n", 0, "Шара открывается"),
+        ]
+        for out, rc, expect in cases:
+            os.environ["FAKE_SMB_OUT"] = out
+            os.environ["FAKE_SMB_RC"] = str(rc)
+            st, text = core.probe_share(sh, {"username": "u", "password": "p"})
+            self.assertIn(expect, text, out)
+            self.assertEqual(st, core.STATUS_OK if rc == 0 else core.STATUS_FAIL, out)
+
+    def test_server_down_skips_smbclient(self):
+        core.tcp_check = lambda host, port=445, timeout=3.0: (False, "нет ответа на порту 445")
+        st, text = core.probe_share(core.Share("a", "fs", "a"), {"username": "u", "password": "p"})
+        self.assertEqual(st, core.STATUS_FAIL)
+        self.assertIn("нет ответа", text)
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_no_smbclient(self):
+        os.environ["PATH"] = "/nonexistent"
+        st, text = core.probe_share(core.Share("a", "fs", "a"), {"username": "u", "password": "p"})
+        self.assertEqual(st, core.STATUS_WARN)
+        self.assertIn("samba-client", text)
+
+    def test_saved_credentials(self):
+        paths = core.Paths(self.tmp.name)
+        os.makedirs(paths.cred_dir)
+        with open(paths.cred_file("docs"), "w") as f:
+            f.write("username=old\npassword=s3cret\ndomain=D\n")
+        sh = core.Share("docs", "fs", "docs")
+        st, _ = core.probe_with_saved_credentials(paths, sh, "docs", username="new")
+        self.assertEqual(st, core.STATUS_OK)
+        self.assertEqual(self.logged()["auth"]["text"],
+                         "username=new\npassword=s3cret\ndomain=D\n")
+        with self.assertRaises(core.OperationError):
+            core.probe_with_saved_credentials(paths, sh, "nope")
+        with self.assertRaises(core.ValidationError):
+            core.probe_with_saved_credentials(
+                paths, core.Share("docs", "fs", "docs", auth=core.AUTH_KERBEROS), "docs")
+
+
 if __name__ == "__main__":
     unittest.main()
