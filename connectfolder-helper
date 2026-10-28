@@ -118,6 +118,27 @@ def action_probe(sysops, params):
     return {"status": status, "text": text}
 
 
+def action_browse(sysops, params):
+    """Список шар или подкаталогов с сохранённым паролем (для формы
+    изменения, когда пароль не меняли). Наружу — только имена."""
+    key = _require_str(params, "key")
+    server = _require_str(params, "server")
+    path = params.get("path") or ""
+    vers = params.get("smb_version") or ""
+    if not isinstance(path, str) or not isinstance(vers, str):
+        raise core.ValidationError("Неверные параметры обзора")
+    overrides = {}
+    for k in ("username", "domain"):
+        v = params.get(k)
+        if v is not None:
+            if not isinstance(v, str):
+                raise core.ValidationError("Неверное поле {}".format(k))
+            overrides[k] = v.strip()
+    status, text, entries = core.browse_with_saved_credentials(
+        sysops.paths, key, server, path, vers, demo=not sysops.paths.is_real, **overrides)
+    return {"status": status, "text": text, "entries": entries}
+
+
 def action_setup(sysops, params):
     core.ensure_master(sysops)
     core.reload_autofs(sysops)
@@ -132,6 +153,7 @@ ACTIONS = {
     "migrate": (action_migrate, True),
     "setup": (action_setup, True),
     "probe": (action_probe, False),
+    "browse": (action_browse, False),
 }
 
 

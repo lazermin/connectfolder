@@ -265,6 +265,176 @@ class ShareRow(Gtk.ListBoxRow):
 
 
 # --------------------------------------------------------------------------
+# Обзор сервера: выбор шары и подкаталога
+# --------------------------------------------------------------------------
+
+class BrowseRow(Gtk.ListBoxRow):
+    def __init__(self, entry_name):
+        super().__init__()
+        self.entry_name = entry_name
+
+
+class BrowseDialog(Gtk.Window):
+    """Обзор шар и каталогов сервера.
+
+    fetch(path, callback) получает содержимое: path == "" — список шар,
+    "шара/подкаталог" — подкаталоги; callback(status, text, entries).
+    on_choose(path) вызывается с выбранным путём «шара/подкаталог».
+    """
+
+    def __init__(self, parent, server, start_path, fetch, on_choose):
+        super().__init__(transient_for=parent, modal=True,
+                         title="Обзор //{}".format(server))
+        self.server = server
+        self.fetch = fetch
+        self.on_choose = on_choose
+        self.path = ""
+        self.request = 0
+        self.set_default_size(520, 460)
+        close_on_escape(self)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
+                      margin_top=14, margin_bottom=14, margin_start=14, margin_end=14)
+
+        top = Gtk.Box(spacing=8)
+        self.up_btn = Gtk.Button(icon_name="go-up-symbolic", tooltip_text="На уровень выше")
+        self.up_btn.connect("clicked", lambda _b: self.go_up())
+        top.append(self.up_btn)
+        self.location = label("", "mono")
+        self.location.set_ellipsize(Pango.EllipsizeMode.START)
+        self.location.set_hexpand(True)
+        top.append(self.location)
+        refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Обновить")
+        refresh.add_css_class("flat")
+        refresh.connect("clicked", lambda _b: self.load(self.path))
+        top.append(refresh)
+        box.append(top)
+
+        self.stack = Gtk.Stack(vexpand=True)
+        spin_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
+                           valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER)
+        self.spinner = Gtk.Spinner(width_request=32, height_request=32)
+        spin_box.append(self.spinner)
+        spin_box.append(label("Загрузка…", "dim-label", xalign=0.5))
+        self.stack.add_named(spin_box, "loading")
+
+        self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
+        self.listbox.add_css_class("share-list")
+        self.listbox.connect("row-activated", self.on_row_activated)
+        self.listbox.connect("selected-rows-changed", lambda _l: self.update_choose())
+        sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+        sw.set_child(self.listbox)
+        self.stack.add_named(sw, "list")
+
+        self.message = label("", wrap=True, xalign=0.5)
+        self.message.set_valign(Gtk.Align.CENTER)
+        self.message.set_justify(Gtk.Justification.CENTER)
+        self.stack.add_named(self.message, "message")
+        box.append(self.stack)
+
+        box.append(label("Двойной щелчок или Enter — открыть каталог", "dim-label cf-caption"))
+
+        btns = Gtk.Box(spacing=8, halign=Gtk.Align.END)
+        cancel = Gtk.Button(label="Отмена")
+        cancel.connect("clicked", lambda _b: self.close())
+        btns.append(cancel)
+        self.choose_btn = Gtk.Button(label="Выбрать")
+        self.choose_btn.add_css_class("suggested-action")
+        self.choose_btn.connect("clicked", lambda _b: self.choose())
+        btns.append(self.choose_btn)
+        box.append(btns)
+        self.set_child(box)
+        self.load(start_path.strip("/"))
+
+    # ---- навигация ----
+
+    def load(self, path):
+        self.request += 1
+        req = self.request
+        self.path = path
+        self.location.set_text("//{}/{}".format(self.server, path) if path
+                               else "//{}  (общие папки)".format(self.server))
+        self.up_btn.set_sensitive(bool(path))
+        self.choose_btn.set_sensitive(False)
+        self.spinner.start()
+        self.stack.set_visible_child_name("loading")
+
+        def done(status, text, entries):
+            if req != self.request:
+                return              # пользователь уже ушёл в другой каталог
+            self.spinner.stop()
+            self.show_entries(status, text, entries)
+        self.fetch(path, done)
+
+    def show_entries(self, status, text, entries):
+        child = self.listbox.get_first_child()
+        while child is not None:
+            nxt = child.get_next_sibling()
+            self.listbox.remove(child)
+            child = nxt
+        if status != core.STATUS_OK:
+            self.message.set_text(text)
+            self.stack.set_visible_child_name("message")
+        elif not entries:
+            self.message.set_text(text or ("Подкаталогов нет. Можно выбрать этот каталог."
+                                           if self.path else "Общих папок не найдено."))
+            self.stack.set_visible_child_name("message")
+        else:
+            for e in entries:
+                self.listbox.append(self.make_row(e))
+            self.stack.set_visible_child_name("list")
+        self.update_choose()
+
+    def make_row(self, entry):
+        row = BrowseRow(entry["name"])
+        hb = Gtk.Box(spacing=10, margin_top=6, margin_bottom=6, margin_start=8, margin_end=8)
+        icon = "folder-remote-symbolic" if entry.get("kind") == "share" else "folder-symbolic"
+        hb.append(Gtk.Image(icon_name=icon))
+        name = label(entry["name"], "dim-label" if entry.get("hidden") else None)
+        name.set_ellipsize(Pango.EllipsizeMode.END)
+        name.set_hexpand(True)
+        hb.append(name)
+        if entry.get("comment"):
+            c = label(entry["comment"], "dim-label cf-caption")
+            c.set_ellipsize(Pango.EllipsizeMode.END)
+            hb.append(c)
+        row.set_child(hb)
+        return row
+
+    def child_path(self, name):
+        return "{}/{}".format(self.path, name) if self.path else name
+
+    def on_row_activated(self, _lb, row):
+        if isinstance(row, BrowseRow):
+            self.load(self.child_path(row.entry_name))
+
+    def go_up(self):
+        if self.path:
+            self.load(self.path.rpartition("/")[0])
+
+    # ---- выбор ----
+
+    def selected_path(self):
+        row = self.listbox.get_selected_row()
+        if isinstance(row, BrowseRow) and self.stack.get_visible_child_name() == "list":
+            return self.child_path(row.entry_name)
+        return self.path
+
+    def update_choose(self):
+        target = self.selected_path()
+        loaded = self.stack.get_visible_child_name() != "loading"
+        self.choose_btn.set_sensitive(bool(target) and loaded)
+        self.choose_btn.set_label("Выбрать «{}»".format(target.rpartition("/")[2])
+                                  if target else "Выбрать")
+
+    def choose(self):
+        target = self.selected_path()
+        if target:
+            self.close()
+            self.on_choose(target)
+
+
+# --------------------------------------------------------------------------
 # Форма добавления/изменения
 # --------------------------------------------------------------------------
 
@@ -297,7 +467,15 @@ class ShareDialog(Gtk.Window):
                 row += 1
 
         self.path = Gtk.Entry(placeholder_text="fileserver/docs  или  \\\\fileserver\\docs")
-        add("Сетевой путь", self.path)
+        self.path.set_hexpand(True)
+        path_box = Gtk.Box(spacing=6)
+        path_box.append(self.path)
+        browse_btn = Gtk.Button(label="Обзор…",
+                                tooltip_text="Выбрать шару и каталог на сервере. "
+                                             "Используются способ входа и учётные данные из формы")
+        browse_btn.connect("clicked", self.on_browse)
+        path_box.append(browse_btn)
+        add("Сетевой путь", path_box)
 
         self.key = Gtk.Entry(placeholder_text="docs", max_length=64)
         self.key_hint = label("", "dim-label cf-caption")
@@ -472,11 +650,34 @@ class ShareDialog(Gtk.Window):
         self.error.set_text(text)
         self.error.set_visible(bool(text))
 
+    def connection_mode(self):
+        """Чем подключаться к серверу для проверки и обзора.
+
+        ("local", creds) — от имени пользователя (Kerberos: creds = None);
+        ("helper", params) — пароль не меняли, его знает только помощник;
+        ("error", текст).
+        """
+        if AUTH_ITEMS[self.auth.get_selected()][0] == core.AUTH_KERBEROS:
+            return "local", None
+        user = self.user.get_text().strip()
+        domain = self.domain.get_text().strip()
+        pw = self.pass_.get_text()
+        if (pw == "" and self.original is not None
+                and self.original.auth == core.AUTH_PASSWORD):
+            return "helper", {"key": self.original.key, "username": user, "domain": domain}
+        if not user:
+            return "error", "Укажите имя пользователя"
+        return "local", {"username": user, "password": pw, "domain": domain}
+
     def on_test(self, _b):
         try:
             sh = self.collect()
         except core.ValidationError as e:
             self.test_label.set_text("✘ " + str(e))
+            return
+        mode, data = self.connection_mode()
+        if mode == "error":
+            self.test_label.set_text("✘ " + data)
             return
         self.test_btn.set_sensitive(False)
         self.test_label.set_text("проверка {}…".format(sh.unc))
@@ -486,36 +687,63 @@ class ShareDialog(Gtk.Window):
             mark = {core.STATUS_OK: "✔ ", core.STATUS_FAIL: "✘ "}.get(status, "⚠ ")
             self.test_label.set_text(mark + text)
 
-        def done_local(res, err):
-            if err is not None:
-                show(core.STATUS_FAIL, str(err))
-            else:
-                show(*res)
-
-        if sh.auth == core.AUTH_KERBEROS:
-            # От имени пользователя, с его билетом Kerberos.
-            run_async(core.probe_share, done_local, sh, None, self.win.demo)
-            return
-
-        user = self.user.get_text().strip()
-        domain = self.domain.get_text().strip()
-        pw = self.pass_.get_text()
-        if (pw == "" and self.original is not None
-                and self.original.auth == core.AUTH_PASSWORD):
-            # Пароль не меняли — интерфейс его не знает, проверяет помощник.
+        if mode == "helper":
             def done_helper(res, err):
                 if err is not None:
                     show(core.STATUS_FAIL, str(err))
                 else:
                     show(res["status"], res["text"])
-            self.win.helper_call("probe", done_helper, key=self.original.key,
-                                 share=sh.to_dict(), username=user, domain=domain)
+            self.win.helper_call("probe", done_helper, share=sh.to_dict(), **data)
             return
-        if not user:
-            show(core.STATUS_FAIL, "Укажите имя пользователя")
+
+        def done_local(res, err):
+            if err is not None:
+                show(core.STATUS_FAIL, str(err))
+            else:
+                show(*res)
+        run_async(core.probe_share, done_local, sh, data, self.win.demo)
+
+    def on_browse(self, _b):
+        try:
+            server = core.parse_server(self.path.get_text())
+        except core.ValidationError as e:
+            self.test_label.set_text("✘ " + str(e))
             return
-        run_async(core.probe_share, done_local, sh,
-                  {"username": user, "password": pw, "domain": domain}, self.win.demo)
+        try:
+            _s, start = core.parse_network_path(self.path.get_text())
+        except core.ValidationError:
+            start = ""
+        mode, data = self.connection_mode()
+        if mode == "error":
+            self.test_label.set_text("✘ " + data + " — без него сервер не покажет папки")
+            return
+        auth = AUTH_ITEMS[self.auth.get_selected()][0]
+        vers = self.versions[self.vers.get_selected()]
+        demo = self.win.demo
+
+        def fetch(path, callback):
+            if mode == "helper":
+                def done_helper(res, err):
+                    if err is not None:
+                        callback(core.STATUS_FAIL, str(err), [])
+                    else:
+                        callback(res["status"], res["text"], res.get("entries", []))
+                self.win.helper_call("browse", done_helper, server=server, path=path,
+                                     smb_version=vers, **data)
+                return
+
+            def done_local(res, err):
+                if err is not None:
+                    callback(core.STATUS_FAIL, str(err), [])
+                else:
+                    callback(*res)
+            run_async(core.smb_browse, done_local, server, path, auth, vers, data, None, demo)
+
+        def chosen(path):
+            self.path.set_text("{}/{}".format(server, path))
+            self.test_label.set_text("")
+
+        BrowseDialog(self, server, start, fetch, chosen).present()
 
     def on_save(self, _b):
         try:

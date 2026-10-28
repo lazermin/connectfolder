@@ -935,55 +935,204 @@ def interpret_smbclient(rc: int, out: str, share: Share) -> Tuple[str, str]:
         rc, ": " + last if last else "")
 
 
-def smb_probe(share: Share, credentials: Optional[Dict[str, str]] = None,
-              auth_file: Optional[str] = None, timeout: float = 30.0) -> Tuple[str, str]:
-    """Проверить шару через smbclient от имени текущего процесса.
+def _write_temp_auth_file(credentials: Dict[str, str]) -> str:
+    """Временный файл учётных данных для smbclient -A (права 0600)."""
+    c = credentials or {}
+    text = format_credentials(c.get("username", ""), c.get("password", ""),
+                              c.get("domain", ""))
+    tmp_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if not tmp_dir or not os.path.isdir(tmp_dir):
+        tmp_dir = None
+    fd, path = tempfile.mkstemp(prefix="connectfolder-", dir=tmp_dir)
+    try:
+        os.fchmod(fd, 0o600)
+        os.write(fd, text.encode("utf-8"))
+    finally:
+        os.close(fd)
+    return path
+
+
+def _smbclient_exec(auth: str, server: str, make_cmd: Callable[[Optional[str]], List[str]],
+                    credentials: Optional[Dict[str, str]] = None,
+                    auth_file: Optional[str] = None,
+                    timeout: float = 30.0) -> Tuple[Optional[Tuple[str, str]], int, str]:
+    """Запустить smbclient от имени текущего процесса.
 
     Kerberos — билет текущего пользователя (KRB5CCNAME или кэш по умолчанию).
     Пароль — либо готовый auth_file (помощник передаёт файл учётных данных),
     либо credentials: тогда пишется временный файл с правами 0600, который
-    удаляется сразу после проверки. В командную строку пароль не попадает.
+    удаляется сразу после запуска. В командную строку пароль не попадает.
+
+    Возвращает (ранний_итог, код, вывод): ранний итог — если запускать
+    не пришлось или не удалось (нет smbclient, Kerberos по IP, таймаут).
     """
     if not smbclient_available():
-        return STATUS_UNKNOWN, "не установлен samba-client (smbclient)"
-    if share.auth == AUTH_KERBEROS and is_ip_address(share.server):
-        return STATUS_WARN, ("для Kerberos укажите имя сервера (FQDN), а не IP-адрес: "
-                             "по IP билет не выдаётся")
+        return (STATUS_UNKNOWN, "не установлен samba-client (smbclient)"), 0, ""
+    if auth == AUTH_KERBEROS and is_ip_address(server):
+        return (STATUS_WARN, "для Kerberos укажите имя сервера (FQDN), а не IP-адрес: "
+                             "по IP билет не выдаётся"), 0, ""
     tmp_path = None
     try:
-        if share.auth == AUTH_PASSWORD and auth_file is None:
-            c = credentials or {}
-            text = format_credentials(c.get("username", ""), c.get("password", ""),
-                                      c.get("domain", ""))
-            tmp_dir = os.environ.get("XDG_RUNTIME_DIR")
-            if not tmp_dir or not os.path.isdir(tmp_dir):
-                tmp_dir = None
-            fd, tmp_path = tempfile.mkstemp(prefix="connectfolder-", dir=tmp_dir)
-            try:
-                os.fchmod(fd, 0o600)
-                os.write(fd, text.encode("utf-8"))
-            finally:
-                os.close(fd)
-            auth_file = tmp_path
-        cmd = build_smbclient_cmd(share, auth_file)
+        if auth == AUTH_PASSWORD and auth_file is None:
+            tmp_path = auth_file = _write_temp_auth_file(credentials or {})
+        cmd = make_cmd(auth_file)
         env = dict(os.environ, LC_ALL="C", LANG="C")
         for k in ("PASSWD", "PASSWD_FD", "PASSWD_FILE"):
             env.pop(k, None)
         try:
             p = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, universal_newlines=True,
-                               timeout=timeout, env=env)
+                               errors="replace", timeout=timeout, env=env)
         except subprocess.TimeoutExpired:
-            return STATUS_FAIL, "сервер не ответил за {} с".format(int(timeout))
-        return interpret_smbclient(p.returncode, p.stdout, share)
+            return (STATUS_FAIL, "сервер не ответил за {} с".format(int(timeout))), 0, ""
+        return None, p.returncode, p.stdout
     except ValidationError as e:
-        return STATUS_FAIL, str(e)
+        return (STATUS_FAIL, str(e)), 0, ""
     finally:
         if tmp_path:
             try:
                 os.unlink(tmp_path)
             except OSError:
                 pass
+
+
+def smb_probe(share: Share, credentials: Optional[Dict[str, str]] = None,
+              auth_file: Optional[str] = None, timeout: float = 30.0) -> Tuple[str, str]:
+    """Проверить шару через smbclient: подключиться, перейти в каталог, прочитать."""
+    early, rc, out = _smbclient_exec(
+        share.auth, share.server, lambda af: build_smbclient_cmd(share, af),
+        credentials, auth_file, timeout)
+    if early:
+        return early
+    return interpret_smbclient(rc, out, share)
+
+
+# ---- обзор сервера: список шар и подкаталогов ----
+
+# Строка «ls» в smbclient: "  %-30s%7.7s %8.0f  %s" — имя, атрибуты, размер,
+# дата в формате asctime. Имя может содержать пробелы; ширина 30 считается
+# в байтах, поэтому для кириллицы выравнивание «плывёт» — опираемся на
+# атрибуты, размер и дату в конце строки.
+_LS_LINE = re.compile(
+    r"^  (?P<name>.+?) *(?P<attr>[VDAHSNRdtsrcone]{1,7}) +(?P<size>\d+)  "
+    r"(?P<date>\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4})\s*$")
+
+DEMO_SHARES = [("public", "Общая папка"), ("docs", "Документы"), ("archive", "Архив")]
+DEMO_DIRS = ["2024", "2025", "Отчёты", "Сканы договоров"]
+
+
+def parse_share_list(out: str) -> List[Dict[str, str]]:
+    """Шары из вывода «smbclient -L -g»: строки «Disk|имя|комментарий».
+
+    Скрытые и служебные шары (имя на «$»: C$, ADMIN$, IPC$) не показываются —
+    их можно вписать в путь вручную.
+    """
+    shares = []
+    for line in out.splitlines():
+        parts = line.split("|", 2)
+        if len(parts) >= 2 and parts[0] == "Disk":
+            name = parts[1]
+            if name and not name.endswith("$"):
+                shares.append({"name": name, "comment": parts[2] if len(parts) > 2 else "",
+                               "kind": "share"})
+    shares.sort(key=lambda e: e["name"].casefold())
+    return shares
+
+
+def parse_dir_list(out: str) -> List[Dict[str, str]]:
+    """Подкаталоги из вывода «ls» smbclient."""
+    dirs = []
+    for line in out.splitlines():
+        m = _LS_LINE.match(line)
+        if not m or "D" not in m.group("attr"):
+            continue
+        name = m.group("name")
+        if name in (".", ".."):
+            continue
+        dirs.append({"name": name, "comment": "", "kind": "dir",
+                     "hidden": "H" in m.group("attr")})
+    dirs.sort(key=lambda e: e["name"].casefold())
+    return dirs
+
+
+def smb_browse(server: str, path: str, auth: str, smb_version: str = "",
+               credentials: Optional[Dict[str, str]] = None,
+               auth_file: Optional[str] = None,
+               demo: bool = False) -> Tuple[str, str, List[Dict[str, str]]]:
+    """Содержимое сервера для выбора каталога.
+
+    path == "" — список шар; "шара" или "шара/подкаталог" — его подкаталоги.
+    Возвращает (статус, пояснение, записи).
+    """
+    validate_server(server)
+    path = path.strip("/")
+    if path:
+        validate_share_path(path)
+    if smb_version and not re.match(r"^\d+(\.\d+){0,2}$", smb_version):
+        raise ValidationError("Неверная версия SMB: {}".format(smb_version))
+    if auth not in (AUTH_PASSWORD, AUTH_KERBEROS):
+        raise ValidationError("Неизвестный способ входа: {}".format(auth))
+
+    if demo:
+        if not path:
+            return STATUS_OK, "", [{"name": n, "comment": c, "kind": "share"}
+                                   for n, c in DEMO_SHARES]
+        if path.count("/") >= 2:
+            return STATUS_OK, "", []
+        return STATUS_OK, "", [{"name": n, "comment": "", "kind": "dir", "hidden": False}
+                               for n in DEMO_DIRS]
+
+    proto_opts: List[str] = []
+    proto = _SMB_PROTOCOLS.get(smb_version)
+    if proto:
+        proto_opts = ["--option=client min protocol=" + proto,
+                      "--option=client max protocol=" + proto]
+
+    def auth_args(af: Optional[str]) -> List[str]:
+        if auth == AUTH_KERBEROS:
+            return _kerberos_flags()
+        if not af:
+            raise ValueError("auth_file обязателен для входа по паролю")
+        return ["-A", af]
+
+    parts = path.split("/") if path else []
+    if not parts:
+        def make_cmd(af):
+            return [SMBCLIENT, "-L", server, "-g", "-t", "15"] + auth_args(af) + proto_opts
+    else:
+        def make_cmd(af):
+            cmd = [SMBCLIENT, "//{}/{}".format(server, parts[0]), "-t", "15"]
+            cmd += auth_args(af) + proto_opts
+            if len(parts) > 1:
+                cmd += ["-D", "/".join(parts[1:])]
+            return cmd + ["-c", "ls"]
+
+    early, rc, out = _smbclient_exec(auth, server, make_cmd, credentials, auth_file)
+    if early:
+        return early[0], early[1], []
+
+    fake = Share(key="browse", server=server, share_path=path or "IPC$", auth=auth,
+                 smb_version=smb_version)
+    if not parts:
+        shares = parse_share_list(out)
+        # После списка шар smbclient может пытаться получить список рабочих
+        # групп по SMB1 и ругаться — это не ошибка, если шары уже получены.
+        if shares:
+            return STATUS_OK, "", shares
+        if re.search(r"NT_STATUS_[A-Z_]+", out) or rc != 0:
+            st, text = interpret_smbclient(rc, out, fake)
+            return st, text[:1].upper() + text[1:], []
+        return STATUS_OK, "На сервере нет общих папок (или они скрыты)", []
+
+    # Любой код ошибки — значит, перейти в каталог не удалось. Важно: при
+    # ошибке -D smbclient всё равно выполнит «ls» в корне шары, поэтому
+    # ошибку проверяем раньше разбора списка.
+    if re.search(r"NT_STATUS_[A-Z_]+", out):
+        st, text = interpret_smbclient(rc, out, fake)
+        if st == STATUS_OK:          # NO_SUCH_FILE здесь не встречается, но на всякий
+            st, text = STATUS_FAIL, "не удалось прочитать каталог"
+        return st, text[:1].upper() + text[1:], []
+    return STATUS_OK, "", parse_dir_list(out)
 
 
 def probe_share(share: Share, credentials: Optional[Dict[str, str]] = None,
@@ -1294,6 +1443,36 @@ def probe_with_saved_credentials(paths: Paths, share: Share, key: str,
     if st == STATUS_UNKNOWN:
         return STATUS_WARN, "Порт 445 открыт, шару проверить нельзя: " + why
     return st, why[:1].upper() + why[1:]
+
+
+def browse_with_saved_credentials(paths: Paths, key: str, server: str, path: str,
+                                  smb_version: str = "",
+                                  username: Optional[str] = None,
+                                  domain: Optional[str] = None,
+                                  demo: bool = False):
+    """Обзор сервера с паролем из файла учётных данных (выполняет помощник)."""
+    validate_key(key)
+    text = _read(paths.cred_file(key))
+    if text is None:
+        raise OperationError("Нет сохранённого пароля для «{}»: введите его в форме".format(key))
+    c = parse_credentials(text)
+    if username is not None:
+        c["username"] = username
+    if domain is not None:
+        c["domain"] = domain
+    return smb_browse(server, path, AUTH_PASSWORD, smb_version, credentials=c, demo=demo)
+
+
+def parse_server(text: str) -> str:
+    """Имя сервера из начала сетевого пути (шара может быть не указана)."""
+    s = (text or "").strip()
+    if s.lower().startswith("smb:"):
+        s = s[4:]
+    parts = [p for p in s.replace("\\", "/").split("/") if p]
+    if not parts:
+        raise ValidationError("Укажите сервер, например fileserver или 10.0.0.5")
+    validate_server(parts[0])
+    return parts[0]
 
 
 # --------------------------------------------------------------------------

@@ -438,7 +438,9 @@ sys.exit(int(os.environ.get("FAKE_SMB_RC", "0")))
 """
 
 
-class TestSmbProbe(unittest.TestCase):
+class FakeSmbclientCase(unittest.TestCase):
+    """Подменяет smbclient скриптом, который запоминает аргументы."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         d = self.tmp.name
@@ -468,6 +470,9 @@ class TestSmbProbe(unittest.TestCase):
     def logged(self):
         with open(self.log) as f:
             return json.load(f)
+
+
+class TestSmbProbe(FakeSmbclientCase):
 
     def test_password_probe_uses_temp_auth_file(self):
         sh = core.Share("docs", "fs", "docs/Отдел продаж", smb_version="1.0")
@@ -562,6 +567,99 @@ class TestSmbProbe(unittest.TestCase):
         with self.assertRaises(core.ValidationError):
             core.probe_with_saved_credentials(
                 paths, core.Share("docs", "fs", "docs", auth=core.AUTH_KERBEROS), "docs")
+
+
+LS_SAMPLE = (
+    "  .                                   D        0  Tue Oct 27 10:00:00 2026\n"
+    "  ..                                  D        0  Tue Oct 27 10:00:00 2026\n"
+    "  Отчёты за 2024                      D        0  Tue Oct 27 10:00:00 2026\n"
+    "  file.txt                            A     1234  Tue Oct 27 10:00:00 2026\n"
+    "  ABC                                 D        0  Tue Oct  7 10:00:00 2026\n"
+    "  very long directory name that exceeds thirty      D        0  Tue Oct 27 10:00:00 2026\n"
+    "  Hidden                             DH        0  Tue Oct 27 10:00:00 2026\n"
+    "  Data D                              D        0  Tue Oct 27 10:00:00 2026\n"
+    "\n\t\t48 blocks of size 1048576. 10 blocks available\n")
+
+
+class TestBrowse(FakeSmbclientCase):
+    def browse(self, path, out, rc=0, **kw):
+        os.environ["FAKE_SMB_OUT"] = out
+        os.environ["FAKE_SMB_RC"] = str(rc)
+        kw.setdefault("credentials", {"username": "u", "password": "p"})
+        return core.smb_browse("fs", path, kw.pop("auth", core.AUTH_PASSWORD), **kw)
+
+    def test_parse_dirs(self):
+        names = [(e["name"], e["hidden"]) for e in core.parse_dir_list(LS_SAMPLE)]
+        self.assertEqual(names, [("ABC", False), ("Data D", False), ("Hidden", True),
+                                 ("very long directory name that exceeds thirty", False),
+                                 ("Отчёты за 2024", False)])
+
+    def test_list_shares(self):
+        st, _t, entries = self.browse("", "Disk|public|Общая\nDisk|C$|Default\n"
+                                          "IPC|IPC$|IPC Service\nDisk|docs|\n"
+                                          "do_connect: Connection to fs failed "
+                                          "(Error NT_STATUS_RESOURCE_NAME_NOT_FOUND)\n"
+                                          "Unable to connect with SMB1 -- no workgroup available\n")
+        self.assertEqual(st, core.STATUS_OK)
+        self.assertEqual([e["name"] for e in entries], ["docs", "public"])
+        argv = self.logged()["argv"]
+        self.assertEqual(argv[:4], ["-L", "fs", "-g", "-t"])
+        self.assertIn("-A", argv)
+
+    def test_list_shares_error(self):
+        st, text, entries = self.browse("", "session setup failed: NT_STATUS_LOGON_FAILURE\n", 1)
+        self.assertEqual((st, entries), (core.STATUS_FAIL, []))
+        self.assertIn("Неверное имя пользователя", text)
+
+    def test_list_subdirs(self):
+        st, _t, entries = self.browse("public/2024", LS_SAMPLE, smb_version="3.0")
+        self.assertEqual(st, core.STATUS_OK)
+        self.assertEqual(len(entries), 5)
+        argv = self.logged()["argv"]
+        self.assertEqual(argv[0], "//fs/public")
+        self.assertEqual(argv[argv.index("-D") + 1], "2024")
+        self.assertEqual(argv[-2:], ["-c", "ls"])
+        self.assertIn("--option=client max protocol=SMB3_00", argv)
+
+    def test_missing_subdir_not_shown_as_root(self):
+        # smbclient после ошибки -D всё равно выводит корень шары — его
+        # нельзя показать как содержимое несуществующего каталога.
+        st, text, entries = self.browse(
+            "public/nety", "cd \\nety\\: NT_STATUS_OBJECT_NAME_NOT_FOUND\n" + LS_SAMPLE, 1)
+        self.assertEqual((st, entries), (core.STATUS_FAIL, []))
+        self.assertIn("«nety»", text)
+
+    def test_kerberos_and_validation(self):
+        st, _t, _e = self.browse("public", LS_SAMPLE, auth=core.AUTH_KERBEROS, credentials=None)
+        self.assertEqual(st, core.STATUS_OK)
+        self.assertIn("--use-kerberos=required", self.logged()["argv"])
+        with self.assertRaises(core.ValidationError):
+            core.smb_browse("fs;id", "", core.AUTH_PASSWORD)
+        with self.assertRaises(core.ValidationError):
+            core.smb_browse("fs", "a/../b", core.AUTH_PASSWORD)
+
+    def test_demo(self):
+        st, _t, entries = core.smb_browse("fs", "", core.AUTH_PASSWORD, demo=True)
+        self.assertEqual(st, core.STATUS_OK)
+        self.assertTrue(entries)
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_saved_credentials_browse(self):
+        paths = core.Paths(self.tmp.name)
+        os.makedirs(paths.cred_dir)
+        with open(paths.cred_file("docs"), "w") as f:
+            f.write("username=old\npassword=s3cret\n")
+        os.environ["FAKE_SMB_OUT"] = "Disk|docs|\n"
+        st, _t, entries = core.browse_with_saved_credentials(paths, "docs", "fs", "",
+                                                             username="new")
+        self.assertEqual([e["name"] for e in entries], ["docs"])
+        self.assertEqual(self.logged()["auth"]["text"], "username=new\npassword=s3cret\n")
+
+    def test_parse_server(self):
+        for text in ("fs", "fs/", "//fs/docs", "\\\\fs\\docs", "smb://fs/docs/x"):
+            self.assertEqual(core.parse_server(text), "fs", text)
+        with self.assertRaises(core.ValidationError):
+            core.parse_server("")
 
 
 if __name__ == "__main__":
