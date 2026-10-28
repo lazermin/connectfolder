@@ -1,5 +1,5 @@
 Name:           connectfolder
-Version:        3.1.2
+Version:        3.1.3
 Release:        1%{?dist}
 Summary:        Connect SMB network folders via autofs (GTK 4)
 Summary(ru):    Подключение сетевых каталогов SMB через autofs (GTK 4)
@@ -56,6 +56,11 @@ Migrates configuration of version 0.1.x (/etc/auto.samba, /root/.auth_smb).
 %{_datadir}/polkit-1/actions/io.github.lazermin.connectfolder.policy
 
 %changelog
+* Wed Oct 28 2026 lazermin <itvolna@gmail.com> - 3.1.3-1
+- Refuse to run the GUI as root (sudo or root session): the file manager
+  would open folders as root and Kerberos checks would use root's ticket.
+  An explanation is shown in a window and printed to the terminal
+
 * Wed Oct 28 2026 lazermin <itvolna@gmail.com> - 3.1.2-1
 - Fix: after editing a saved folder (path, password, options) the old mount
   stayed active until the autofs idle timeout; it is now unmounted, lazily

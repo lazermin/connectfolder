@@ -105,6 +105,11 @@
 `connectfolder-helper`. Пароль спрашивается один раз за сеанс, поэтому
 программа работает и под Wayland.
 
+**Запуск от root запрещён** (`sudo connectfolder`, сеанс root): программа
+показывает объяснение и закрывается. Иначе от root работали бы и файловый
+менеджер, в котором открываются каталоги, и проверка входа по Kerberos — с
+билетом root вместо билета пользователя.
+
 Помощник умеет только: сохранить каталог, удалить каталог, отдать имя и
 домен учётной записи (пароль из файла наружу не отдаётся), перенести
 старую конфигурацию, подключить карту к autofs. Shell не используется,
@@ -132,9 +137,9 @@ Autofs после изменений **перечитывает** карту (`s
 
 ```bash
 sudo dnf install rpm-build make
-tar xzf connectfolder-3.1.2.tar.gz && cd connectfolder-3.1.2
+tar xzf connectfolder-3.1.3.tar.gz && cd connectfolder-3.1.3
 make rpm
-sudo dnf install ~/rpmbuild/RPMS/noarch/connectfolder-3.1.2-1.*.noarch.rpm
+sudo dnf install ~/rpmbuild/RPMS/noarch/connectfolder-3.1.3-1.*.noarch.rpm
 ```
 
 ### Без установки, из папки

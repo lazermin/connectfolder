@@ -1150,28 +1150,57 @@ class MainWindow(Gtk.ApplicationWindow):
         about.present()
 
 
+ROOT_TITLE = "Программу нельзя запускать от имени root"
+
+
+def root_refusal_text():
+    text = ("Запустите «Сетевые каталоги» от обычного пользователя: из меню или "
+            "командой connectfolder без sudo. Права администратора программа "
+            "запросит сама и только тогда, когда нужно изменить настройки.\n\n"
+            "От имени root каталоги открывались бы в файловом менеджере, запущенном "
+            "от root, а проверка входа по Kerberos шла бы с билетом root, а не "
+            "пользователя.")
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        text += "\n\nСейчас программа запущена через sudo пользователем {}.".format(sudo_user)
+    return text
+
+
 class App(Gtk.Application):
-    def __init__(self, demo):
+    def __init__(self, demo, refuse_root=False):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.FLAGS_NONE)
         self.demo = demo
+        self.refuse_root = refuse_root
 
     def do_startup(self):
         Gtk.Application.do_startup(self)
         load_css()
 
     def do_activate(self):
+        if self.refuse_root:
+            # Окно с объяснением: если программу запустили из меню сеанса root,
+            # сообщения в терминале никто не увидит.
+            holder = Gtk.ApplicationWindow(application=self, title="Сетевые каталоги")
+            holder.set_default_size(1, 1)
+            message_dialog(holder, ROOT_TITLE, root_refusal_text(), [("ok", "Закрыть")],
+                           lambda _r: self.quit())
+            return
         win = self.get_active_window() or MainWindow(self, self.demo)
         win.present()
 
 
 def main(argv):
+    if os.geteuid() == 0:
+        sys.stderr.write("connectfolder: {}.\n{}\n".format(
+            ROOT_TITLE, root_refusal_text()))
+        # Окно показываем, только если есть доступ к графическому сеансу.
+        if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+            App(False, refuse_root=True).run([argv[0]])
+        return 1
     demo = "--demo" in argv or os.environ.get("CONNECTFOLDER_DEMO") == "1"
     if demo and not os.path.isdir(DEMO_ROOT):
         sys.stderr.write("Демо-корень не найден. Выполните: make demo-reset\n")
         return 1
-    if os.geteuid() == 0 and not demo:
-        sys.stderr.write("Запускайте программу от обычного пользователя: права root "
-                         "запрашиваются через pkexec только для изменений.\n")
     argv = [a for a in argv if a != "--demo"]
     return App(demo).run(argv)
 
